@@ -30,8 +30,12 @@ export class LanResponder {
   }
 }
 
-/** Devolve o IP local do host da sala, ou null se não estiver na mesma rede. */
+/**
+ * Devolve o IP local do host da sala, ou null se não estiver na mesma rede.
+ * CT_NO_LAN_DISCOVERY=1 desliga a busca (testes: força usar o IP do código).
+ */
 export function findOnLan(secret: number, timeoutMs = 500): Promise<string | null> {
+  if (process.env.CT_NO_LAN_DISCOVERY === '1') return Promise.resolve(null)
   return new Promise((resolve) => {
     const socket = dgram.createSocket('udp4')
     let done = false

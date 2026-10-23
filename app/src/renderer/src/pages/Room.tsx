@@ -40,12 +40,18 @@ export default function RoomPage(): React.JSX.Element {
     void session.updateSettings({ sendVolume: v })
   }
 
-  const portsWarning =
-    session.isHost && meta?.scope === 'internet' && session.info?.portsOpen === false
-      ? 'Não consegui abrir as portas no roteador (UPnP). Se você não abriu manualmente TCP 7880–7881 e UDP 7882, amigos de fora não vão conseguir entrar.'
-      : session.isHost && meta?.scope === 'lan'
-        ? 'Sem IP público: esta sala só funciona para quem está na mesma rede local.'
-        : null
+  const viaIpv6 = !!session.info?.endpoint.includes(':')
+  const portsWarning = !session.isHost
+    ? null
+    : session.info?.cgnat && viaIpv6
+      ? 'Sua internet tem CGNAT, então esta sala foi criada pelo IPv6. Quem for entrar precisa ter IPv6 na internet. Se ninguém conseguir entrar, libere conexões IPv6 de entrada no firewall do roteador (TCP 7880–7881 e UDP 7882).'
+      : session.info?.cgnat
+        ? 'Sua internet usa CGNAT: a operadora divide o mesmo IP público entre vários clientes, então amigos de fora não conseguem chegar no seu PC, nem com as portas abertas. Peça para um amigo sem CGNAT criar a sala, ou peça um IP público à operadora.'
+        : meta?.scope === 'internet' && !viaIpv6 && session.info?.portsOpen === false
+          ? 'Não consegui abrir as portas no roteador (UPnP). Se você não abriu manualmente TCP 7880–7881 e UDP 7882, amigos de fora não vão conseguir entrar.'
+          : meta?.scope === 'lan'
+            ? 'Sem IP público: esta sala só funciona para quem está na mesma rede local.'
+            : null
 
   return (
     <div className="room">

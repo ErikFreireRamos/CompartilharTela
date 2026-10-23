@@ -18,14 +18,19 @@ export class PublicServer {
 
   constructor(private readonly identity: () => string) {}
 
-  /** Abre a porta 7880. false se estiver ocupada (outra instância do app). */
-  listen(): Promise<boolean> {
-    if (this.server) return Promise.resolve(true)
+  /** Abre a porta 7880 (IPv4 e IPv6). false se estiver ocupada (outra instância do app). */
+  async listen(): Promise<boolean> {
+    if (this.server) return true
+    // '::' atende IPv4 e IPv6 juntos; sem IPv6 no PC, só IPv4
+    return (await this.listenOn('::')) || (await this.listenOn('0.0.0.0'))
+  }
+
+  private listenOn(address: string): Promise<boolean> {
     return new Promise((resolve) => {
       const server = http.createServer((req, res) => void this.onRequest(req, res))
       server.on('upgrade', (req, socket, head) => this.onUpgrade(req, socket as net.Socket, head))
       server.once('error', () => resolve(false))
-      server.listen(PUBLIC_PORT, '0.0.0.0', () => {
+      server.listen({ port: PUBLIC_PORT, host: address, ipv6Only: false }, () => {
         this.server = server
         resolve(true)
       })
@@ -39,18 +44,25 @@ export class PublicServer {
     this.stopUdpProbe()
   }
 
-  /** Eco UDP na porta de mídia; precisa ser fechado antes de virar host. */
-  startUdpProbe(): Promise<boolean> {
-    if (this.udpProbe) return Promise.resolve(true)
+  /** Eco UDP na porta de mídia (IPv4 e IPv6); precisa ser fechado antes de virar host. */
+  async startUdpProbe(): Promise<boolean> {
+    if (this.udpProbe) return true
+    return (await this.bindUdpProbe('udp6')) || (await this.bindUdpProbe('udp4'))
+  }
+
+  private bindUdpProbe(type: 'udp4' | 'udp6'): Promise<boolean> {
     return new Promise((resolve) => {
-      const socket = dgram.createSocket('udp4')
+      const socket = dgram.createSocket({ type, ipv6Only: false })
       socket.on('message', (msg, rinfo) => {
         const text = msg.toString()
         if (text.startsWith(UDP_PROBE)) {
           socket.send(UDP_PROBE_OK + text.slice(UDP_PROBE.length), rinfo.port, rinfo.address)
         }
       })
-      socket.once('error', () => resolve(false))
+      socket.once('error', () => {
+        socket.close()
+        resolve(false)
+      })
       socket.bind(RTC_UDP_PORT, () => {
         this.udpProbe = socket
         resolve(true)

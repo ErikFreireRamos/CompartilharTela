@@ -27,7 +27,7 @@ describe.skipIf(!enabled)('host com LiveKit real', () => {
   const server = new PublicServer(() => 'host-id')
 
   beforeAll(async () => {
-    await host.start({ secret: 4242, epoch: 1, hostId: 'host-id', hostName: 'Host', publicIp: null, code: 'TEST' })
+    await host.start({ secret: 4242, epoch: 1, hostId: 'host-id', hostName: 'Host', publicIp: null, nodeIp: null, code: 'TEST' })
     expect(await server.listen()).toBe(true)
     server.host = host
   }, 30_000)

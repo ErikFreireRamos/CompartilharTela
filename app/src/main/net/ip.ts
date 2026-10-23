@@ -26,6 +26,19 @@ export function isPrivateIPv4(ip: string): boolean {
   )
 }
 
+/** IPv4 ou IPv6 que não é alcançável pela internet (local, link-local, ULA, CGNAT). */
+export function isPrivateIp(ip: string): boolean {
+  if (!ip.includes(':')) return isPrivateIPv4(ip)
+  const lower = ip.toLowerCase()
+  if (lower.startsWith('::ffff:')) return isPrivateIPv4(lower.slice(7))
+  return lower === '::1' || lower.startsWith('fe80') || /^f[cd]/.test(lower)
+}
+
+/** IP pronto para URL: IPv6 vai entre colchetes. */
+export function urlHost(ip: string): string {
+  return ip.includes(':') ? `[${ip}]` : ip
+}
+
 /** Rede doméstica comum primeiro; VPNs (Radmin 26.x, Hamachi 25.x...) por último. */
 function lanPriority(ip: string): number {
   if (ip.startsWith('192.168.')) return 0

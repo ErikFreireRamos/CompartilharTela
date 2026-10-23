@@ -47,7 +47,46 @@ describe('roomCode', () => {
   })
 
   it('rejeita tamanho errado', () => {
-    expect(() => decodeRoomCode('ABCD-EFGH')).toThrow(/12 caracteres/)
+    expect(() => decodeRoomCode('ABCD-EFGH')).toThrow(/12 ou 32 caracteres/)
+  })
+
+  it('IPv6: ida e volta, em 32 caracteres', () => {
+    const cases = [
+      { ip: '2804:29b8:5086:d32:6bef:d569:5167:43ee', secret: 4242 },
+      { ip: '2001:db8::1', secret: 0 },
+      { ip: '::1', secret: ROOM_SECRET_MAX - 1 },
+      { ip: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', secret: 7 },
+      { ip: '2804:0:0:1::', secret: 99 }
+    ]
+    for (const c of cases) {
+      const code = encodeRoomCode(c)
+      expect(code).toMatch(/^([0-9A-Z]{4}-){7}[0-9A-Z]{4}$/)
+      expect(decodeRoomCode(code)).toEqual(c)
+    }
+  })
+
+  it('IPv6: aceita a forma longa e devolve a curta', () => {
+    const code = encodeRoomCode({ ip: '2001:0db8:0000:0000:0000:0000:0000:0001', secret: 1 })
+    expect(decodeRoomCode(code).ip).toBe('2001:db8::1')
+  })
+
+  it('IPv6: detecta qualquer caractere trocado (inclusive a partir da posição 30)', () => {
+    const code = normalizeRoomCode(encodeRoomCode({ ip: '2804:29b8:5086:d32:6bef:d569:5167:43ee', secret: 123 }))
+    const alphabet = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+    for (let i = 0; i < code.length; i++) {
+      for (const c of alphabet) {
+        if (c === code[i]) continue
+        if (Math.abs(alphabet.indexOf(c) - alphabet.indexOf(code[i])) === 31) continue
+        const typo = code.slice(0, i) + c + code.slice(i + 1)
+        expect(() => decodeRoomCode(typo)).toThrow()
+      }
+    }
+  })
+
+  it('rejeita IPv6 malformado', () => {
+    expect(() => encodeRoomCode({ ip: '2001::db8::1', secret: 1 })).toThrow()
+    expect(() => encodeRoomCode({ ip: '1:2:3:4:5:6:7', secret: 1 })).toThrow()
+    expect(() => encodeRoomCode({ ip: '2001:db8::xyz', secret: 1 })).toThrow()
   })
 
   it('gera segredo dentro do limite', () => {

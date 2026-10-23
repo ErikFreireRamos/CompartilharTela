@@ -3,7 +3,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { AccessToken, RoomServiceClient, TrackSource } from 'livekit-server-sdk'
 import { MAX_PARTICIPANTS, ROOM_NAME, type QualityId, type RoomMeta } from '../../shared/protocol'
-import { isPrivateIPv4 } from '../net/ip'
+import { isPrivateIp } from '../net/ip'
 import { LiveKitProcess, type LiveKitPaths } from './livekitProcess'
 import { probeCandidate } from './probe'
 
@@ -12,7 +12,10 @@ export interface HostStartOptions {
   epoch: number
   hostId: string
   hostName: string
+  /** Endereço pelo qual a internet chega neste PC (IPv4 público ou IPv6); null = só rede local. */
   publicIp: string | null
+  /** IPv4 público atrás de um roteador (o LiveKit anuncia ele no lugar do IP local). */
+  nodeIp: string | null
   code: string
 }
 
@@ -51,7 +54,7 @@ export class HostController {
   async start(opts: HostStartOptions): Promise<void> {
     this.secret = opts.secret
     this.publicIp = opts.publicIp
-    await this.livekit.start(opts.publicIp)
+    await this.livekit.start(opts.nodeIp)
     this.svc = new RoomServiceClient(this.livekit.url, this.livekit.apiKey, this.livekit.apiSecret)
     this.meta = {
       v: 1,
@@ -127,7 +130,7 @@ export class HostController {
     const target = reportedIp ?? this.seenIps.get(identity) ?? null
     let canHost = false
     if (listening && target && target !== this.publicIp) {
-      const reachableScope = this.meta.scope === 'lan' || !isPrivateIPv4(target)
+      const reachableScope = this.meta.scope === 'lan' || !isPrivateIp(target)
       canHost = reachableScope && (await probeCandidate(target, identity))
     }
     try {

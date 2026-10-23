@@ -7,6 +7,7 @@ import { decodeRoomCode, encodeRoomCode, generateRoomSecret } from '../shared/ro
 import { AudioCaptureService } from './audio/audioCapture'
 import { HostController } from './host/hostController'
 import { PublicServer } from './host/publicServer'
+import { urlHost } from './net/ip'
 import { findOnLan, LanResponder } from './net/lanDiscovery'
 import { NetworkManager } from './net/network'
 import { SettingsStore } from './settings'
@@ -109,14 +110,25 @@ async function becomeHost(secret: number, epoch: number, nickname: string): Prom
     throw new Error(`A porta ${PUBLIC_PORT} já está em uso. Há outra cópia do app aberta?`)
   }
   const netInfo = await network.resolve()
-  const portsOpen = netInfo.publicIp ? await network.openPorts() : false
-  const ip = netInfo.publicIp ?? netInfo.lanIps[0] ?? '127.0.0.1'
+  // IPv4 público quando dá; com CGNAT, IPv6 (o CGNAT só existe no IPv4); senão, só rede local
+  const viaIpv4 = !!netInfo.publicIp && !netInfo.cgnat
+  const publicIp = viaIpv4 ? netInfo.publicIp : netInfo.ipv6
+  const portsOpen = viaIpv4 ? await network.openPorts() : false
+  const ip = publicIp ?? netInfo.lanIps[0] ?? '127.0.0.1'
   const code = encodeRoomCode({ ip, secret })
   const ctl = new HostController({
     exe: path.join(binDir, 'livekit-server.exe'),
     workDir: path.join(app.getPath('userData'), 'livekit')
   })
-  await ctl.start({ secret, epoch, hostId: clientId(), hostName: nickname, publicIp: netInfo.publicIp, code })
+  await ctl.start({
+    secret,
+    epoch,
+    hostId: clientId(),
+    hostName: nickname,
+    publicIp,
+    nodeIp: viaIpv4 ? netInfo.publicIp : null,
+    code
+  })
   host = ctl
   publicServer.host = ctl
   lanResponder = await LanResponder.start(secret)
@@ -130,8 +142,21 @@ async function becomeHost(secret: number, epoch: number, nickname: string): Prom
     secret,
     isHost: true,
     portsOpen,
+    cgnat: netInfo.cgnat,
     scope: ctl.roomMeta.scope
   }
+}
+
+async function unreachableHostError(ip: string): Promise<Error> {
+  if (!ip.includes(':')) {
+    return new Error('Não consegui falar com o host. Ele pode ter saído ou estar com as portas fechadas.')
+  }
+  const { ipv6 } = await network.resolve()
+  return new Error(
+    ipv6
+      ? 'Não consegui falar com o host pelo IPv6. Ele pode ter saído, ou o roteador dele está bloqueando conexões IPv6 de entrada (procure "firewall IPv6" nas configurações do roteador).'
+      : 'Esta sala usa IPv6 (a internet do host tem CGNAT), mas a sua internet não tem IPv6. Peça para outra pessoa criar a sala.'
+  )
 }
 
 async function joinTarget(ip: string, secret: number, nickname: string): Promise<JoinInfo> {
@@ -139,14 +164,14 @@ async function joinTarget(ip: string, secret: number, nickname: string): Promise
   const target = (await findOnLan(secret)) ?? ip
   let res: Response
   try {
-    res = await fetch(`http://${target}:${PUBLIC_PORT}/api/join`, {
+    res = await fetch(`http://${urlHost(target)}:${PUBLIC_PORT}/api/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ secret, identity: clientId(), name: nickname }),
       signal: AbortSignal.timeout(6000)
     })
   } catch {
-    throw new Error('Não consegui falar com o host. Ele pode ter saído ou estar com as portas fechadas.')
+    throw await unreachableHostError(target)
   }
   const body = (await res.json().catch(() => ({}))) as { error?: string; token?: string; code?: string }
   if (!res.ok || !body.token) {
@@ -154,7 +179,7 @@ async function joinTarget(ip: string, secret: number, nickname: string): Promise
   }
   inRoom = true
   return {
-    url: `ws://${target}:${PUBLIC_PORT}`,
+    url: `ws://${urlHost(target)}:${PUBLIC_PORT}`,
     token: body.token,
     identity: clientId(),
     endpoint: ip,
@@ -168,8 +193,12 @@ async function prepareCandidate(): Promise<CandidateInfo> {
   const listening = (await publicServer.listen()) && (await publicServer.startUdpProbe())
   if (!listening) return { listening: false, publicIp: null, portsOpen: false }
   const netInfo = await network.resolve()
-  const portsOpen = netInfo.publicIp ? await network.openPorts() : false
-  return { listening, publicIp: netInfo.publicIp, portsOpen }
+  if (netInfo.publicIp && !netInfo.cgnat) {
+    return { listening, publicIp: netInfo.publicIp, portsOpen: await network.openPorts() }
+  }
+  // atrás de CGNAT, só dá para ser host pelo IPv6
+  if (netInfo.ipv6) return { listening, publicIp: netInfo.ipv6, portsOpen: false }
+  return { listening: false, publicIp: null, portsOpen: false }
 }
 
 async function leaveRoom(): Promise<void> {

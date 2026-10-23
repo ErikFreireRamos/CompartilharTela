@@ -20,7 +20,7 @@ App para Windows de transmissão de tela com áudio entre amigos: até 10 pessoa
 ```
 
 - **Servidor de mídia:** o [LiveKit](https://github.com/livekit/livekit) roda embutido no app de quem é host. Ele só repassa vídeo e não recodifica, então gasta pouca CPU. O que limita a sala é o **upload** do host (a tela de compartilhar mostra uma estimativa).
-- **Código da sala:** leva o IP público do host e um segredo, sem nenhum serviço externo. Quando o host muda, o código muda junto, e a sala sempre mostra o código atual.
+- **Código da sala:** leva o IP público do host (IPv4, ou IPv6 quando há CGNAT) e um segredo, sem nenhum serviço externo. Quando o host muda, o código muda junto, e a sala sempre mostra o código atual.
 - **Áudio por app:** fica no `audio-capture.exe` (C++), que usa o *process loopback* do WASAPI (Windows 10 2004+ ou 11). Se não funcionar, o app transmite o áudio do PC inteiro e avisa na tela.
 
 ## Rede (importante para quem for host)
@@ -29,7 +29,11 @@ App para Windows de transmissão de tela com áudio entre amigos: até 10 pessoa
   - O app tenta abrir essas portas sozinho via **UPnP**.
   - Se o roteador não aceitar, aparece um aviso na sala, e você abre as portas manualmente uma vez no roteador.
   - O instalador cria as regras do Firewall do Windows.
-- **IP público:** sem IP público (CGNAT) não dá para ser host pela internet. Nesse caso a sala só funciona na rede local.
+- **CGNAT (IP compartilhado pela operadora):** o app detecta e, como o CGNAT só existe no IPv4, cria a sala pelo **IPv6**. Nesse caso:
+  - o código fica com 32 caracteres;
+  - quem entra também precisa ter IPv6;
+  - o roteador do host precisa deixar entrar conexões IPv6 nas mesmas portas. Alguns roteadores de operadora bloqueiam por padrão; procure "firewall IPv6" nas configurações.
+  - Sem IPv6, a sala só funciona na rede local.
 - **Quem pode ser host:** quando alguém entra, o host testa se as portas dessa pessoa estão acessíveis. Quem passa aparece como **"reserva"** na lista e pode assumir o host. Se ninguém passar no teste e o host sair, a sala acaba.
 - **Mesma casa do host:** amigos na mesma rede local do host conectam pelo IP local automaticamente (descoberta por UDP 7883).
 
@@ -68,7 +72,7 @@ npx electron . --profile=b      # cópia B (entre com o código)
 
 A cópia B usa outra pasta de configuração. Ela não consegue ser host enquanto a A estiver aberta, porque as portas são as mesmas. Por isso a **troca de host** só pode ser testada com dois PCs.
 
-`CT_NO_UPNP=1` faz o app não mexer no roteador. É útil para testes automatizados.
+`CT_NO_UPNP=1` faz o app não mexer no roteador, e `CT_NO_LAN_DISCOVERY=1` faz a cópia que entra usar o IP do código em vez de achar o host pela rede local (útil para testar o caminho IPv6 num PC só). As duas servem para testes automatizados.
 
 ## Estrutura
 

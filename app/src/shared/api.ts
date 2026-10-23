@@ -40,6 +40,8 @@ export interface JoinInfo {
   isHost: boolean
   /** Só para o host: se as portas foram abertas (UPnP ou IP direto). */
   portsOpen?: boolean
+  /** Só para o host: a operadora usa CGNAT, então ninguém de fora alcança este PC. */
+  cgnat?: boolean
   scope?: 'internet' | 'lan'
 }
 

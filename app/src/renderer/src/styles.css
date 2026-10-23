@@ -238,6 +238,11 @@ input[type='checkbox'] {
   text-align: center;
   text-transform: uppercase;
 }
+/* código IPv6 (32 caracteres) */
+.code-input.long {
+  font-size: 12px;
+  letter-spacing: 0;
+}
 
 /* ---- Sala */
 .room {

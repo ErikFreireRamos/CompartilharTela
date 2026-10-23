@@ -2,9 +2,9 @@ import { useState } from 'react'
 import AdminWarning from '../components/AdminWarning'
 import { session } from '../lib/roomSession'
 
-/** Formata enquanto digita: XXXX-XXXX-XXXX */
+/** Formata enquanto digita: XXXX-XXXX-XXXX (IPv4) ou 8 grupos (IPv6) */
 function formatCode(raw: string): string {
-  const clean = raw.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 12)
+  const clean = raw.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 32)
   return clean.match(/.{1,4}/g)?.join('-') ?? ''
 }
 
@@ -13,6 +13,8 @@ export default function Home(): React.JSX.Element {
   const [code, setCode] = useState('')
   const connecting = session.phase === 'connecting'
   const name = nickname.trim()
+  const codeLength = code.replace(/-/g, '').length
+  const codeComplete = codeLength === 12 || codeLength === 32
 
   const saveNickname = (): void => {
     if (name !== session.settings?.nickname) void session.updateSettings({ nickname: name })
@@ -63,13 +65,13 @@ export default function Home(): React.JSX.Element {
         <form className="card" onSubmit={join}>
           <h2>Entrar em sala</h2>
           <input
-            className="code-input"
+            className={`code-input ${codeLength > 12 ? 'long' : ''}`}
             value={code}
             placeholder="XXXX-XXXX-XXXX"
             onChange={(e) => setCode(formatCode(e.target.value))}
             spellCheck={false}
           />
-          <button className="primary" type="submit" disabled={!name || code.length < 14 || connecting}>
+          <button className="primary" type="submit" disabled={!name || !codeComplete || connecting}>
             {connecting ? 'Conectando…' : 'Entrar'}
           </button>
         </form>

@@ -3,13 +3,14 @@
 import dgram from 'node:dgram'
 import { randomBytes } from 'node:crypto'
 import { PUBLIC_PORT, RTC_UDP_PORT } from '../../shared/protocol'
+import { urlHost } from '../net/ip'
 
 export const UDP_PROBE = 'CT-PROBE '
 export const UDP_PROBE_OK = 'CT-PROBE-OK '
 
 async function probeTcp(ip: string, identity: string, nonce: string): Promise<boolean> {
   try {
-    const res = await fetch(`http://${ip}:${PUBLIC_PORT}/probe?nonce=${nonce}`, {
+    const res = await fetch(`http://${urlHost(ip)}:${PUBLIC_PORT}/probe?nonce=${nonce}`, {
       signal: AbortSignal.timeout(2500)
     })
     const body = (await res.json()) as { nonce?: string; id?: string }
@@ -21,7 +22,7 @@ async function probeTcp(ip: string, identity: string, nonce: string): Promise<bo
 
 function probeUdp(ip: string, nonce: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = dgram.createSocket('udp4')
+    const socket = dgram.createSocket(ip.includes(':') ? 'udp6' : 'udp4')
     let attempts = 0
     let done = false
     const finish = (ok: boolean): void => {
