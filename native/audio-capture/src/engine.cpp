@@ -32,25 +32,49 @@ bool InBlockedTree(const ProcMap& procs, DWORD pid, const std::vector<std::wstri
   return false;
 }
 
+bool IsOnlyExe(const ProcMap& procs, DWORD pid, const std::vector<std::wstring>& only) {
+  const auto it = procs.find(pid);
+  return it != procs.end() && std::find(only.begin(), only.end(), it->second.exe) != only.end();
+}
+
+/** O processo é do app escolhido, ou filho/descendente dele (árvore do app). */
+bool InOnlyTree(const ProcMap& procs, DWORD pid, const std::vector<std::wstring>& only) {
+  if (IsOnlyExe(procs, pid, only)) return true;
+  for (const DWORD ancestor : Ancestors(procs, pid)) {
+    if (IsOnlyExe(procs, ancestor, only)) return true;
+  }
+  return false;
+}
+
 /**
  * Processos que capturaríamos e quais apps aparecem na lista.
  * A captura inclui a árvore inteira do processo; por isso um processo com um
  * descendente bloqueado (ex.: o explorer.exe que abriu o Discord) fica de fora.
  */
 std::unordered_set<DWORD> WantedProcesses(const ProcMap& procs, const std::vector<SessionInfo>& sessions,
-                                          const std::vector<std::wstring>& blocked, DWORD excludePid) {
-  std::unordered_set<DWORD> tainted;
-  for (const auto& [pid, info] : procs) {
-    if (IsBlockedRoot(procs, pid, blocked, excludePid)) {
-      for (const DWORD ancestor : Ancestors(procs, pid)) tainted.insert(ancestor);
-    }
-  }
+                                          const std::vector<std::wstring>& blocked,
+                                          const std::vector<std::wstring>& only, DWORD excludePid) {
   const DWORD self = GetCurrentProcessId();
   std::unordered_set<DWORD> wanted;
-  for (const SessionInfo& session : sessions) {
-    if (session.pid == self || tainted.count(session.pid)) continue;
-    if (InBlockedTree(procs, session.pid, blocked, excludePid)) continue;
-    wanted.insert(session.pid);
+
+  if (!only.empty()) {
+    // "só este app": independente da lista de bloqueio, só a árvore do app escolhido
+    for (const SessionInfo& session : sessions) {
+      if (session.pid == self || session.pid == excludePid) continue;
+      if (InOnlyTree(procs, session.pid, only)) wanted.insert(session.pid);
+    }
+  } else {
+    std::unordered_set<DWORD> tainted;
+    for (const auto& [pid, info] : procs) {
+      if (IsBlockedRoot(procs, pid, blocked, excludePid)) {
+        for (const DWORD ancestor : Ancestors(procs, pid)) tainted.insert(ancestor);
+      }
+    }
+    for (const SessionInfo& session : sessions) {
+      if (session.pid == self || tainted.count(session.pid)) continue;
+      if (InBlockedTree(procs, session.pid, blocked, excludePid)) continue;
+      wanted.insert(session.pid);
+    }
   }
   // se um ancestral também vai ser capturado, a árvore dele já inclui este
   for (auto it = wanted.begin(); it != wanted.end();) {
@@ -75,11 +99,12 @@ CaptureEngine::~CaptureEngine() {
   CloseHandle(wake_);
 }
 
-void CaptureEngine::Start(std::vector<std::wstring> blocked, DWORD excludePid) {
+void CaptureEngine::Start(std::vector<std::wstring> blocked, std::vector<std::wstring> only, DWORD excludePid) {
   Stop();
   {
     std::lock_guard<std::mutex> lock(configMutex_);
     blocked_ = std::move(blocked);
+    only_ = std::move(only);
     excludePid_ = excludePid;
   }
   failedAt_.clear();
@@ -92,6 +117,14 @@ void CaptureEngine::SetBlocked(std::vector<std::wstring> blocked) {
   {
     std::lock_guard<std::mutex> lock(configMutex_);
     blocked_ = std::move(blocked);
+  }
+  SetEvent(wake_);
+}
+
+void CaptureEngine::SetOnly(std::vector<std::wstring> only) {
+  {
+    std::lock_guard<std::mutex> lock(configMutex_);
+    only_ = std::move(only);
   }
   SetEvent(wake_);
 }
@@ -120,14 +153,16 @@ void CaptureEngine::WatchLoop() {
 
 void CaptureEngine::Refresh() {
   std::vector<std::wstring> blocked;
+  std::vector<std::wstring> only;
   DWORD excludePid = 0;
   {
     std::lock_guard<std::mutex> lock(configMutex_);
     blocked = blocked_;
+    only = only_;
     excludePid = excludePid_;
   }
   const ProcMap procs = SnapshotProcesses();
-  const std::unordered_set<DWORD> wanted = WantedProcesses(procs, EnumerateAudioSessions(), blocked, excludePid);
+  const std::unordered_set<DWORD> wanted = WantedProcesses(procs, EnumerateAudioSessions(), blocked, only, excludePid);
 
   std::vector<std::unique_ptr<ProcessCapture>> removed;
   {

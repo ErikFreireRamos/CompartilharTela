@@ -9,6 +9,8 @@ export interface ShareOptions {
   quality: QualityId
   contentType: ContentType
   audio: boolean
+  /** Com janela escolhida: 'app' = só o áudio do app dela; 'pc' = todos os apps. */
+  audioScope: 'app' | 'pc'
   blocked: string[]
   sendVolume: number
 }
@@ -40,10 +42,22 @@ export async function startScreenShare(opts: ShareOptions): Promise<LocalShare> 
   let audio: SendAudio | null = null
   let audioMode: LocalShare['audioMode'] = 'none'
   let warning: string | null = null
+  // "só este app" só faz sentido para janela: o Windows captura áudio por processo
+  const appScope = opts.audio && opts.audioScope === 'app' && opts.sourceId.startsWith('window:')
 
   if (opts.audio) {
     const port = nextAudioPort()
-    const result = await api.audio.start(opts.blocked)
+    let only: string[] = []
+    if (appScope) {
+      const owner = await api.audio.resolveWindow(opts.sourceId)
+      if (owner.exe) {
+        only = [owner.exe]
+      } else {
+        warning =
+          'Não consegui descobrir o app desta janela. O áudio de todos os apps (menos os bloqueados) será transmitido.'
+      }
+    }
+    const result = await api.audio.start(opts.blocked, only)
     if (result.ok) {
       const p = await port
       if (p) {

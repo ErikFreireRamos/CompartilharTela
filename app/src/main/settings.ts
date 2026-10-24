@@ -12,6 +12,7 @@ const DEFAULTS: Omit<Settings, 'clientId'> = {
   quality: '1080p30',
   contentType: 'motion',
   shareAudio: true,
+  audioScope: 'app',
   sendVolume: 1
 }
 

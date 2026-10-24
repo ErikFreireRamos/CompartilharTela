@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Force $buildDir, $outDir | Out-Null
 
 $sources = (Get-ChildItem (Join-Path $root 'src') -Filter *.cpp | ForEach-Object { "`"$($_.FullName)`"" }) -join ' '
 $flags = '/nologo /O2 /EHsc /std:c++17 /W4 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A00000A'
-$libs = 'ole32.lib mmdevapi.lib avrt.lib winmm.lib'
+$libs = 'ole32.lib mmdevapi.lib avrt.lib winmm.lib user32.lib'
 $cmd = "`"$vcvars`" >nul && cl $flags /Fo`"$buildDir\\`" $sources /Fe`"$outDir\audio-capture.exe`" /link $libs"
 
 cmd /c $cmd

@@ -13,6 +13,12 @@ function toIp(n: number): string {
   return [24, 16, 8, 0].map((shift) => (n >>> shift) & 255).join('.')
 }
 
+/** Faixa do CGNAT (RFC 6598): o roteador recebe esse IP da operadora. */
+export function isCgnatIPv4(ip: string): boolean {
+  const [a, b] = ip.split('.').map(Number)
+  return a === 100 && b >= 64 && b <= 127
+}
+
 /** Faixas que não são alcançáveis pela internet (inclui CGNAT 100.64/10). */
 export function isPrivateIPv4(ip: string): boolean {
   const [a, b] = ip.split('.').map(Number)
@@ -22,7 +28,7 @@ export function isPrivateIPv4(ip: string): boolean {
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
     (a === 169 && b === 254) ||
-    (a === 100 && b >= 64 && b <= 127)
+    isCgnatIPv4(ip)
   )
 }
 

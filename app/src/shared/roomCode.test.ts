@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeRoomCode, encodeRoomCode, generateRoomSecret, normalizeRoomCode, ROOM_SECRET_MAX } from './roomCode'
+import { decodeRoomCode, encodeRoomCode, extractRoomCode, generateRoomSecret, normalizeRoomCode, ROOM_SECRET_MAX } from './roomCode'
 
 describe('roomCode', () => {
   it('ida e volta preserva IP e segredo', () => {
@@ -87,6 +87,18 @@ describe('roomCode', () => {
     expect(() => encodeRoomCode({ ip: '2001::db8::1', secret: 1 })).toThrow()
     expect(() => encodeRoomCode({ ip: '1:2:3:4:5:6:7', secret: 1 })).toThrow()
     expect(() => encodeRoomCode({ ip: '2001:db8::xyz', secret: 1 })).toThrow()
+  })
+
+  it('extrai o código de uma mensagem colada', () => {
+    const v4 = encodeRoomCode({ ip: '189.45.7.200', secret: 123456 })
+    expect(extractRoomCode(v4)).toBe(normalizeRoomCode(v4))
+    expect(extractRoomCode(`Entra na minha sala: código ${v4} — CompartilhadorDeTela`)).toBe(normalizeRoomCode(v4))
+    expect(extractRoomCode(`  ${v4.toLowerCase().replace(/-/g, ' ')}  `)).toBe(normalizeRoomCode(v4))
+    const v6 = encodeRoomCode({ ip: '2804:29b8::1', secret: 7 })
+    expect(extractRoomCode(`sala ${v6}`)).toBe(normalizeRoomCode(v6))
+    expect(extractRoomCode(normalizeRoomCode(v4))).toBe(normalizeRoomCode(v4))
+    expect(extractRoomCode('nenhum código aqui')).toBeNull()
+    expect(extractRoomCode('Compartilhardetela')).toBeNull()
   })
 
   it('gera segredo dentro do limite', () => {

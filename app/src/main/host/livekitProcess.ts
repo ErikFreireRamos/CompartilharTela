@@ -81,6 +81,12 @@ export class LiveKitProcess {
       '  use_external_ip: false',
       ...(nodeIp ? [`  node_ip: ${nodeIp}`, '  advertise_internal_ip: true'] : []),
       '  enable_loopback_candidate: true',
+      // O default do LiveKit inclui o STUN da Twilio, que falha no DNS em muitas
+      // redes (ERR_NAME_NOT_RESOLVED = -105) e só polui o log. Os dois do Google
+      // já fazem parte do default e a conexão direta usa node_ip/UPnP mesmo.
+      '  stun_servers:',
+      '    - stun.l.google.com:19302',
+      '    - stun1.l.google.com:19302',
       'keys:',
       `  ${this.apiKey}: ${this.apiSecret}`,
       'room:',

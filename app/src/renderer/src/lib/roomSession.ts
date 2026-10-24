@@ -58,6 +58,8 @@ const JOIN_RETRY_WINDOW_MS = 25_000
 
 export class RoomSession {
   phase: Phase = 'idle'
+  /** Sinalização caiu e ainda não voltou (indicador amarelo na sala). */
+  reconnecting = false
   /** Aviso temporário no topo da sala (troca de host, conexão instável...). */
   notice: string | null = null
   /** Erro mostrado na tela inicial. */
@@ -207,6 +209,7 @@ export class RoomSession {
     // Sinalização ou mídia caiu: se não voltar logo, o host provavelmente saiu do ar
     const onReconnecting = (): void => {
       if (room !== this.room || this.reconnectTimer) return
+      this.reconnecting = true
       this.notice = 'Conexão com o host instável…'
       this.changed()
       this.reconnectTimer = setTimeout(() => void this.onHostLost(room), HOST_LOST_AFTER_MS)
@@ -260,6 +263,7 @@ export class RoomSession {
   private clearReconnectTimer(): void {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
+    this.reconnecting = false
   }
 
   /** Última lista conhecida de quem estava na sala; usada se o host cair. */

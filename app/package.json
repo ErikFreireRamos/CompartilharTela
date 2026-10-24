@@ -16,7 +16,8 @@
     "dist": "npm run build && electron-builder --win"
   },
   "dependencies": {
-    "livekit-server-sdk": "^2.19.2"
+    "livekit-server-sdk": "^2.19.2",
+    "lucide-react": "^1.61.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

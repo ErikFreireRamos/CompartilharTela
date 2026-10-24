@@ -2,28 +2,39 @@
 //
 // Comandos (stdin, um JSON por linha):
 //   {"cmd":"list","blocked":["discord.exe"],"excludePid":123}
-//   {"cmd":"start","blocked":["discord.exe"],"excludePid":123}
+//   {"cmd":"start","blocked":["discord.exe"],"only":[],"excludePid":123}
 //   {"cmd":"setBlocked","blocked":["discord.exe","spotify.exe"]}
+//   {"cmd":"setOnly","only":["game.exe"]}
+//   {"cmd":"pidOfWindow","hwnd":327750}
 //   {"cmd":"stop"}
-// Eventos (stdout, ver common.h): apps, started, stopped, error, log; mais o PCM.
+// `only` não vazio = captura só aqueles apps (e os filhos deles), ignorando `blocked`.
+// Eventos (stdout, ver common.h): apps, started, stopped, error, log, pid; mais o PCM.
 // Fecha sozinho quando o stdin fecha (o app saiu).
 #include "common.h"
 #include "capture.h"
 #include "engine.h"
+#include "processes.h"
 
 namespace {
 
-std::vector<std::wstring> ReadBlocked(const std::string& line) {
-  std::vector<std::wstring> blocked;
-  for (const std::string& exe : JsonGetStringArray(line, "blocked")) blocked.push_back(ToLower(FromUtf8(exe)));
-  return blocked;
+std::vector<std::wstring> ReadExes(const std::string& line, const char* key) {
+  std::vector<std::wstring> exes;
+  for (const std::string& exe : JsonGetStringArray(line, key)) exes.push_back(ToLower(FromUtf8(exe)));
+  return exes;
+}
+
+/** Nome do executável (minúsculo) dono do processo. */
+std::string ExeForPid(DWORD pid) {
+  const ProcMap procs = SnapshotProcesses();
+  const auto it = procs.find(pid);
+  return it == procs.end() ? std::string() : ToUtf8(it->second.exe);
 }
 
 void HandleCommand(CaptureEngine& engine, const std::string& line) {
   const std::string cmd = JsonGetString(line, "cmd");
   const DWORD excludePid = static_cast<DWORD>(JsonGetInt(line, "excludePid", 0));
   if (cmd == "list") {
-    SendJson(CaptureEngine::AppsJson(ReadBlocked(line), excludePid));
+    SendJson(CaptureEngine::AppsJson(ReadExes(line, "blocked"), excludePid));
   } else if (cmd == "start") {
     if (!ProcessLoopbackSupported()) {
       SendJson(
@@ -31,10 +42,19 @@ void HandleCommand(CaptureEngine& engine, const std::string& line) {
           "\"este Windows n\\u00e3o suporta captura de \\u00e1udio por app (precisa do Windows 10 2004+ ou 11)\"}");
       return;
     }
-    engine.Start(ReadBlocked(line), excludePid);
+    engine.Start(ReadExes(line, "blocked"), ReadExes(line, "only"), excludePid);
     SendJson("{\"event\":\"started\"}");
   } else if (cmd == "setBlocked") {
-    engine.SetBlocked(ReadBlocked(line));
+    engine.SetBlocked(ReadExes(line, "blocked"));
+  } else if (cmd == "setOnly") {
+    engine.SetOnly(ReadExes(line, "only"));
+  } else if (cmd == "pidOfWindow") {
+    // o app manda o HWND que o Electron devolve no id da fonte (window:<hwnd>:0)
+    const auto hwnd = reinterpret_cast<HWND>(static_cast<intptr_t>(JsonGetInt(line, "hwnd", 0)));
+    DWORD pid = 0;
+    if (hwnd) GetWindowThreadProcessId(hwnd, &pid);
+    const std::string exe = pid ? ExeForPid(pid) : std::string();
+    SendJson("{\"event\":\"pid\",\"pid\":" + std::to_string(pid) + ",\"exe\":" + JsonString(exe) + "}");
   } else if (cmd == "stop") {
     engine.Stop();
     SendJson("{\"event\":\"stopped\"}");

@@ -10,17 +10,19 @@
 #include "common.h"
 
 /**
- * Decide quais processos capturar (todos com som, menos os apps bloqueados e o
- * próprio CompartilhadorDeTela), mantém uma captura por processo e mixa tudo em
- * blocos de 10 ms enviados pelo stdout.
+ * Decide quais processos capturar e mantém uma captura por processo, mixando
+ * tudo em blocos de 10 ms enviados pelo stdout.
+ *   - `only` vazio: todos com som, menos os apps bloqueados e o próprio app;
+ *   - `only` preenchido: só aqueles apps (e os filhos deles) — "só esta janela".
  */
 class CaptureEngine {
  public:
   CaptureEngine();
   ~CaptureEngine();
 
-  void Start(std::vector<std::wstring> blocked, DWORD excludePid);
+  void Start(std::vector<std::wstring> blocked, std::vector<std::wstring> only, DWORD excludePid);
   void SetBlocked(std::vector<std::wstring> blocked);
+  void SetOnly(std::vector<std::wstring> only);
   void Stop();
 
   /** Evento "apps": apps com sessão de áudio agora e se estão bloqueados. */
@@ -33,6 +35,8 @@ class CaptureEngine {
 
   std::mutex configMutex_;
   std::vector<std::wstring> blocked_;
+  /** Não vazio = modo "só este app": só estes executáveis (e os filhos) entram. */
+  std::vector<std::wstring> only_;
   DWORD excludePid_ = 0;
 
   std::mutex capturesMutex_;

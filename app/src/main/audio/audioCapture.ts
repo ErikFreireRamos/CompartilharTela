@@ -99,10 +99,10 @@ export class AudioCaptureService extends EventEmitter<{ status: [AudioStatus] }>
     return (msg?.apps as AudioApp[] | undefined) ?? []
   }
 
-  async start(blocked: string[], excludePid: number, target: WebContents): Promise<AudioStartResult> {
+  async start(blocked: string[], only: string[], excludePid: number, target: WebContents): Promise<AudioStartResult> {
     if (!this.ensureProcess()) return { ok: false, error: 'audio-capture.exe não encontrado (rode "npm run build:audio")' }
     const reply = this.waitFor(['started', 'error'], 6000)
-    this.send({ cmd: 'start', blocked, excludePid })
+    this.send({ cmd: 'start', blocked, only, excludePid })
     const msg = await reply
     if (msg?.event !== 'started') {
       return { ok: false, error: String(msg?.message ?? 'O módulo de áudio não respondeu') }
@@ -113,6 +113,15 @@ export class AudioCaptureService extends EventEmitter<{ status: [AudioStatus] }>
     target.postMessage('audio:port', null, [port2])
     this.emit('status', { state: 'running' })
     return { ok: true }
+  }
+
+  /** Executável dono de uma janela, a partir do HWND do id da fonte (window:<hwnd>:0). */
+  async resolveWindow(hwnd: number): Promise<{ pid: number; exe: string }> {
+    if (!hwnd || !this.ensureProcess()) return { pid: 0, exe: '' }
+    const reply = this.waitFor(['pid'], 3000)
+    this.send({ cmd: 'pidOfWindow', hwnd })
+    const msg = await reply
+    return { pid: Number(msg?.pid ?? 0), exe: String(msg?.exe ?? '') }
   }
 
   setBlocked(blocked: string[]): void {

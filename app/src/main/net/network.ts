@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import path from 'node:path'
 import { PUBLIC_PORT, RTC_TCP_PORT, RTC_UDP_PORT } from '../../shared/protocol'
-import { isPrivateIPv4, lanInterfaces } from './ip'
+import { isCgnatIPv4, isPrivateIPv4, lanInterfaces } from './ip'
 import { stunPublicIp } from './stun'
 import { Upnp, type PortSpec } from './upnp'
 
@@ -46,9 +46,26 @@ export class NetworkManager {
   /** CT_NO_UPNP=1 não mexe no roteador (testes automatizados). */
   private readonly upnpEnabled = process.env.CT_NO_UPNP !== '1'
   private cached: { info: NetworkInfo; at: number } | null = null
+  /** Uma checagem por vez: Home e "Criar sala" podem pedir ao mesmo tempo. */
+  private pending: Promise<NetworkInfo> | null = null
+
+  /** Descarta o resultado guardado (o rodapé da Home pede uma checagem nova). */
+  invalidate(): void {
+    this.cached = null
+  }
 
   async resolve(): Promise<NetworkInfo> {
     if (this.cached && Date.now() - this.cached.at < 60_000) return this.cached.info
+    if (this.pending) return this.pending
+    this.pending = this.probe()
+    try {
+      return await this.pending
+    } finally {
+      this.pending = null
+    }
+  }
+
+  private async probe(): Promise<NetworkInfo> {
     const lanIps = lanInterfaces().map((i) => i.address)
     const [routerIp, stunIp, ipv6] = await Promise.all([
       // IP que o roteador recebeu da operadora vs. IP com que a internet nos vê
@@ -59,7 +76,9 @@ export class NetworkManager {
     let publicIp = stunIp
     if (!publicIp && routerIp && !isPrivateIPv4(routerIp)) publicIp = routerIp
     if (publicIp && isPrivateIPv4(publicIp)) publicIp = null
-    const cgnat = !!routerIp && !!publicIp && routerIp !== publicIp
+    // O IP do roteador na faixa 100.64/10 já é CGNAT por si só: não depende do
+    // STUN ter respondido (quando ele falha, o aviso de UPnP aparecia por engano).
+    const cgnat = (!!routerIp && isCgnatIPv4(routerIp)) || (!!routerIp && !!publicIp && routerIp !== publicIp)
     const info: NetworkInfo = { publicIp, direct: !!publicIp && lanIps.includes(publicIp), cgnat, ipv6, lanIps }
     this.cached = { info, at: Date.now() }
     return info

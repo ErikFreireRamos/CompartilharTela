@@ -21,7 +21,8 @@ const api: Api = {
   },
   audio: {
     listApps: (blocked) => ipcRenderer.invoke('audio:list-apps', blocked),
-    start: (blocked) => ipcRenderer.invoke('audio:start', blocked),
+    start: (blocked, only) => ipcRenderer.invoke('audio:start', blocked, only ?? []),
+    resolveWindow: (sourceId) => ipcRenderer.invoke('audio:resolve-window', sourceId),
     setBlocked: (blocked) => ipcRenderer.invoke('audio:set-blocked', blocked),
     stop: () => ipcRenderer.invoke('audio:stop'),
     onStatus: (cb) => on<AudioStatus>('audio:status', cb)
@@ -44,7 +45,20 @@ const api: Api = {
     isElevated: () => ipcRenderer.invoke('app:is-elevated'),
     onCloseRequested: (cb) => on<void>('app:close-requested', cb),
     quitNow: () => ipcRenderer.invoke('app:quit-now'),
-    clipboard: (text) => ipcRenderer.invoke('app:clipboard', text)
+    clipboard: (text) => ipcRenderer.invoke('app:clipboard', text),
+    readClipboard: () => ipcRenderer.invoke('app:read-clipboard')
+  },
+  net: {
+    status: (refresh) => ipcRenderer.invoke('net:status', refresh ?? false)
+  },
+  popout: {
+    open: (request) => ipcRenderer.invoke('popout:open', request),
+    ready: () => ipcRenderer.send('popout:ready'),
+    answer: (key, sdp) => ipcRenderer.send('popout:answer', { key, sdp }),
+    close: (key) => ipcRenderer.send('popout:close', key),
+    onOffer: (cb) => on('popout:offer', cb),
+    onAnswer: (cb) => on('popout:answer', cb),
+    onClosed: (cb) => on<{ key: string }>('popout:closed', (value) => cb(value.key))
   }
 }
 

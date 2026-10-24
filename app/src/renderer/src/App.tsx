@@ -1,4 +1,5 @@
 import { useEffect, useSyncExternalStore } from 'react'
+import Toasts from './components/Toasts'
 import { api } from './lib/api'
 import { session } from './lib/roomSession'
 import Home from './pages/Home'
@@ -21,6 +22,7 @@ export default function App(): React.JSX.Element {
   return (
     <>
       {inRoom ? <RoomPage /> : <Home />}
+      <Toasts />
       <div className="credit">by Erik Freire Ramos</div>
     </>
   )

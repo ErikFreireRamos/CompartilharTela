@@ -10,6 +10,7 @@ import { PublicServer } from './host/publicServer'
 import { urlHost } from './net/ip'
 import { findOnLan, LanResponder } from './net/lanDiscovery'
 import { NetworkManager } from './net/network'
+import { closeAllPopouts, registerPopoutIpc } from './popout'
 import { SettingsStore } from './settings'
 
 // Perfil separado para testar duas cópias no mesmo PC: electron . --profile=b
@@ -47,6 +48,12 @@ let cleanedUp = false
 
 function clientId(): string {
   return settings.get().clientId
+}
+
+/** "window:327750:0" -> 327750 (o HWND que o Windows usa para achar o processo). */
+function windowHandleOf(sourceId: string): number {
+  const match = /^window:(\d+)/.exec(sourceId)
+  return match ? Number(match[1]) : 0
 }
 
 let elevated: Promise<boolean> | null = null
@@ -89,7 +96,10 @@ function createWindow(): void {
       app.quit()
     }, 8000)
   })
-  win.on('closed', () => (win = null))
+  win.on('closed', () => {
+    win = null
+    closeAllPopouts()
+  })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(process.env.ELECTRON_RENDERER_URL)
   else void win.loadFile(path.join(__dirname, '../renderer/index.html'))
@@ -214,15 +224,28 @@ function registerIpc(): void {
   ipcMain.handle('settings:set', (_e, patch: Partial<Settings>) => settings.set(patch))
 
   ipcMain.handle('screen:sources', async () => {
-    const sources = await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 320, height: 180 } })
-    return sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
+    const sources = await desktopCapturer.getSources({
+      types: ['screen', 'window'],
+      thumbnailSize: { width: 320, height: 180 }
+    })
+    return sources
+      .filter((s) => s.name.trim())
+      .map((s) => ({
+        id: s.id,
+        name: s.name,
+        kind: (s.id.startsWith('window:') ? 'window' : 'screen') as 'window' | 'screen',
+        thumbnail: s.thumbnail.toDataURL()
+      }))
   })
   ipcMain.handle('screen:select', (_e, sourceId: string, systemAudio: boolean) => {
     pendingShare = { sourceId, systemAudio }
   })
 
   ipcMain.handle('audio:list-apps', (_e, blocked: string[]) => audio.listApps(blocked))
-  ipcMain.handle('audio:start', (e, blocked: string[]) => audio.start(blocked, process.pid, e.sender))
+  ipcMain.handle('audio:resolve-window', (_e, sourceId: string) => audio.resolveWindow(windowHandleOf(sourceId)))
+  ipcMain.handle('audio:start', (e, blocked: string[], only: string[]) =>
+    audio.start(blocked, only ?? [], process.pid, e.sender)
+  )
   ipcMain.handle('audio:set-blocked', (_e, blocked: string[]) => audio.setBlocked(blocked))
   ipcMain.handle('audio:stop', () => audio.stop())
 
@@ -252,6 +275,12 @@ function registerIpc(): void {
     app.quit()
   })
   ipcMain.handle('app:clipboard', (_e, text: string) => clipboard.writeText(text))
+  ipcMain.handle('app:read-clipboard', () => clipboard.readText())
+
+  ipcMain.handle('net:status', (_e, refresh: boolean) => {
+    if (refresh) network.invalidate()
+    return network.resolve()
+  })
 }
 
 app.whenReady().then(() => {
@@ -261,13 +290,19 @@ app.whenReady().then(() => {
   audio.on('status', (status) => win?.webContents.send('audio:status', status))
 
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {
-    const sources = await desktopCapturer.getSources({ types: ['screen'] })
+    // telas e janelas: o sourceId escolhido na interface pode ser dos dois tipos
+    const sources = await desktopCapturer.getSources({ types: ['screen', 'window'] })
     const source = sources.find((s) => s.id === pendingShare?.sourceId) ?? sources[0]
     if (!source) return callback({})
     callback(pendingShare?.systemAudio ? { video: source, audio: 'loopback' } : { video: source })
   })
 
   registerIpc()
+  registerPopoutIpc({
+    devUrl: process.env.ELECTRON_RENDERER_URL ?? null,
+    indexHtml: path.join(__dirname, '../renderer/index.html'),
+    preload: path.join(__dirname, '../preload/index.js')
+  })
   createWindow()
 })
 

@@ -121,6 +121,33 @@ export function decodeRoomCode(code: string): RoomAddress {
   }
 }
 
+/**
+ * Acha um código válido dentro de um texto (ex.: a mensagem que o amigo mandou
+ * no Discord). Aceita o código sozinho ou no meio da frase, com ou sem hífens.
+ */
+export function extractRoomCode(text: string): string | null {
+  const upper = text.toUpperCase()
+  const candidates: string[] = []
+  const trimmed = upper.trim()
+  if (/^[0-9A-Z\s-]+$/.test(trimmed)) candidates.push(trimmed)
+  // como o app exibe: grupos de 4 separados por hífen
+  candidates.push(...(upper.match(/(?<![0-9A-Z])(?:[0-9A-Z]{4}-){2,7}[0-9A-Z]{4}(?![0-9A-Z])/g) ?? []))
+  // sem separador, no meio de uma frase
+  candidates.push(...(upper.match(/(?<![0-9A-Z])[0-9A-Z]{12}(?:[0-9A-Z]{20})?(?![0-9A-Z])/g) ?? []))
+
+  for (const candidate of candidates) {
+    const clean = normalizeRoomCode(candidate)
+    if (clean.length !== 12 && clean.length !== 32) continue
+    try {
+      decodeRoomCode(clean)
+      return clean
+    } catch {
+      // candidato não era um código de verdade: tenta o próximo
+    }
+  }
+  return null
+}
+
 export function generateRoomSecret(): number {
   const buf = new Uint32Array(1)
   crypto.getRandomValues(buf)
