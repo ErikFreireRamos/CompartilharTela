@@ -74,7 +74,6 @@ pub struct StreamView {
     pub is_local: bool,
     pub has_audio: bool,
     pub receive: ReceiveQuality,
-    pub frame: Option<CapturedVideoFrame>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +144,8 @@ pub struct RoomSession {
     audio: Mutex<AudioCaptureEngine>,
     capturer: Mutex<Option<ScreenCapturer>>,
     receive_modes: Mutex<HashMap<String, ReceiveQuality>>,
+    frames: std::sync::RwLock<HashMap<String, CapturedVideoFrame>>,
+    repaint_cb: std::sync::RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
     http: Client,
     snapshot_tx: watch::Sender<SessionSnapshot>,
     snapshot_rx: watch::Receiver<SessionSnapshot>,
@@ -181,10 +182,33 @@ impl RoomSession {
             audio: Mutex::new(AudioCaptureEngine::new()),
             capturer: Mutex::new(None),
             receive_modes: Mutex::new(HashMap::new()),
+            frames: std::sync::RwLock::new(HashMap::new()),
+            repaint_cb: std::sync::RwLock::new(None),
             http: Client::new(),
             snapshot_tx: tx,
             snapshot_rx: rx,
         })
+    }
+
+    pub fn set_repaint_callback(&self, cb: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut guard) = self.repaint_cb.write() {
+            *guard = Some(cb);
+        }
+    }
+
+    fn request_repaint(&self) {
+        if let Ok(guard) = self.repaint_cb.read()
+            && let Some(ref cb) = *guard
+        {
+            cb();
+        }
+    }
+
+    pub fn latest_frame(&self, identity: &str) -> Option<CapturedVideoFrame> {
+        self.frames
+            .read()
+            .ok()
+            .and_then(|map| map.get(identity).cloned())
     }
 
     pub fn subscribe(&self) -> watch::Receiver<SessionSnapshot> {
@@ -209,6 +233,7 @@ impl RoomSession {
     {
         let updated = self.settings.lock().await.update(mutate).clone();
         self.snapshot_tx.send_modify(|s| s.settings = updated);
+        self.request_repaint();
     }
 
     pub async fn set_blocked_apps(&self, blocked: Vec<String>) {
@@ -238,6 +263,7 @@ impl RoomSession {
                 stream.receive = mode;
             }
         });
+        self.request_repaint();
     }
 
     pub async fn set_max_quality(&self, quality: Option<QualityId>) {
@@ -245,6 +271,7 @@ impl RoomSession {
             host.set_max_quality(quality).await;
             let meta = host.room_meta().await;
             self.snapshot_tx.send_modify(|s| s.meta = Some(meta));
+            self.request_repaint();
         }
     }
 
@@ -253,6 +280,7 @@ impl RoomSession {
             s.phase = Phase::Connecting;
             s.error = None;
         });
+        self.request_repaint();
         let secret = generate_room_secret();
         match self.become_host(secret, 1, nickname.clone()).await {
             Ok((info, meta)) => {
@@ -270,6 +298,7 @@ impl RoomSession {
                     s.meta = Some(meta);
                     s.peers = vec![local_peer];
                 });
+                self.request_repaint();
             }
             Err(err) => {
                 self.reset_with_error(Some(err)).await;
@@ -282,6 +311,7 @@ impl RoomSession {
             s.phase = Phase::Connecting;
             s.error = None;
         });
+        self.request_repaint();
         let addr = match decode_room_code(&code) {
             Ok(a) => a,
             Err(e) => {
@@ -304,6 +334,7 @@ impl RoomSession {
                     s.info = Some(info);
                     s.peers = vec![local_peer];
                 });
+                self.request_repaint();
             }
             Err(err) => {
                 self.reset_with_error(Some(err)).await;
@@ -379,9 +410,9 @@ impl RoomSession {
                 is_local: true,
                 has_audio: audio_mode != AudioMode::None,
                 receive: ReceiveQuality::Auto,
-                frame: None,
             });
         });
+        self.request_repaint();
 
         let session_weak = Arc::downgrade(self);
         tokio::spawn(async move {
@@ -389,12 +420,12 @@ impl RoomSession {
                 let Some(session) = session_weak.upgrade() else {
                     break;
                 };
-                let frame = frame_rx.borrow().clone();
-                session.snapshot_tx.send_modify(|s| {
-                    if let Some(st) = s.streams.iter_mut().find(|st| st.is_local) {
-                        st.frame = frame;
+                if let Some(frame) = frame_rx.borrow().clone() {
+                    if let Ok(mut map) = session.frames.write() {
+                        map.insert(local_id.clone(), frame);
                     }
-                });
+                    session.request_repaint();
+                }
             }
         });
 
@@ -406,6 +437,10 @@ impl RoomSession {
             cap.stop();
         }
         self.audio.lock().await.stop();
+        let local_id = self.settings.lock().await.get().client_id.clone();
+        if let Ok(mut map) = self.frames.write() {
+            map.remove(&local_id);
+        }
         self.snapshot_tx.send_modify(|s| {
             s.share = None;
             if let Some(p) = s.peers.iter_mut().find(|p| p.is_local) {
@@ -413,6 +448,7 @@ impl RoomSession {
             }
             s.streams.retain(|st| !st.is_local);
         });
+        self.request_repaint();
     }
 
     async fn become_host(

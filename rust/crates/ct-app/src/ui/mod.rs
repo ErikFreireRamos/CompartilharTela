@@ -83,26 +83,36 @@ impl CompartilharApp {
 
     fn sync_textures(&mut self, ctx: &Context) {
         for stream in &self.snap.streams {
-            if let Some(ref frame) = stream.frame {
-                let needs_upload = self
-                    .textures
-                    .get(&stream.identity)
-                    .is_none_or(|(seq, _)| *seq != frame.seq);
-                if needs_upload {
-                    let image = ColorImage::from_rgba_unmultiplied(
-                        [frame.width as usize, frame.height as usize],
-                        &frame.rgba,
-                    );
-                    let handle = ctx.load_texture(
-                        format!("stream-{}", stream.identity),
-                        image,
-                        TextureOptions::LINEAR,
-                    );
-                    self.textures
-                        .insert(stream.identity.clone(), (frame.seq, handle));
-                }
+            let Some(frame) = self.session.latest_frame(&stream.identity) else {
+                continue;
+            };
+            let needs_upload = self
+                .textures
+                .get(&stream.identity)
+                .is_none_or(|(seq, _)| *seq != frame.seq);
+            if !needs_upload {
+                continue;
+            }
+            let image = ColorImage::from_rgba_unmultiplied(
+                [frame.width as usize, frame.height as usize],
+                &frame.rgba,
+            );
+            if let Some((seq, handle)) = self.textures.get_mut(&stream.identity) {
+                handle.set(image, TextureOptions::LINEAR);
+                *seq = frame.seq;
+            } else {
+                let handle = ctx.load_texture(
+                    format!("stream-{}", stream.identity),
+                    image,
+                    TextureOptions::LINEAR,
+                );
+                self.textures
+                    .insert(stream.identity.clone(), (frame.seq, handle));
             }
         }
+        // Remove texturas de streams encerrados
+        self.textures
+            .retain(|id, _| self.snap.streams.iter().any(|s| &s.identity == id));
     }
 }
 
@@ -114,21 +124,22 @@ impl eframe::App for CompartilharApp {
         self.sync_textures(ctx);
 
         // Intercepta fechamento enquanto está numa sala para passar o host antes de sair
-        if ctx.input(|i| i.viewport().close_requested()) {
-            if self.snap.phase != Phase::Idle && !self.closing_room {
-                self.closing_room = true;
-                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-                let session = self.session.clone();
-                let ctx_clone = ctx.clone();
-                self.rt.spawn(async move {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(8),
-                        session.leave_room(),
-                    )
-                    .await;
-                    ctx_clone.send_viewport_cmd(ViewportCommand::Close);
-                });
-            }
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.snap.phase != Phase::Idle
+            && !self.closing_room
+        {
+            self.closing_room = true;
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            let session = self.session.clone();
+            let ctx_clone = ctx.clone();
+            self.rt.spawn(async move {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    session.leave_room(),
+                )
+                .await;
+                ctx_clone.send_viewport_cmd(ViewportCommand::Close);
+            });
         }
 
         match self.snap.phase {
@@ -136,8 +147,8 @@ impl eframe::App for CompartilharApp {
             Phase::Connected | Phase::Migrating => room::render_room(self, ctx),
         }
 
-        if self.snap.share.is_some() || self.snap.phase == Phase::Connecting {
-            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        if self.snap.phase == Phase::Connecting {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
 }
@@ -153,7 +164,7 @@ pub fn render_admin_warning(ui: &mut egui::Ui, elevated: bool) {
         .show(ui, |ui| {
             ui.colored_label(
                 Color32::from_rgb(255, 224, 150),
-                "⚠ O app está rodando como administrador. O Windows bloqueia a captura de tela nesse modo — feche e abra normalmente.",
+                "[!] O app está rodando como administrador. O Windows bloqueia a captura de tela nesse modo — feche e abra normalmente.",
             );
         });
 }

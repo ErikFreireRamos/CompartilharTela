@@ -17,9 +17,9 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     egui::TopBottomPanel::top("room_header").show(ctx, |ui| {
         ui.horizontal(|ui| {
             let code_label = if copied {
-                format!("Código {} ✓ copiado", snap.code())
+                format!("Código {} (copiado!)", snap.code())
             } else {
-                format!("Código {} ⧉", snap.code())
+                format!("Código {} [Copiar]", snap.code())
             };
             if ui.button(RichText::new(code_label).strong()).clicked() {
                 ctx.copy_text(snap.code().to_string());
@@ -31,7 +31,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                 .as_ref()
                 .map(|m| m.host_name.as_str())
                 .unwrap_or("…");
-            ui.label(format!("Host: {host_name} 👑"));
+            ui.label(format!("Host: {host_name}"));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -84,6 +84,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     egui::TopBottomPanel::bottom("room_footer").show(ctx, |ui| {
         ui.horizontal(|ui| {
             if let Some(ref share) = snap.share {
+                draw_live_dot(ui);
                 let mode_str = match share.audio_mode {
                     AudioMode::Native => " · áudio por app",
                     AudioMode::System => " · áudio do PC inteiro",
@@ -91,7 +92,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                 };
                 ui.colored_label(
                     Color32::from_rgb(100, 230, 140),
-                    format!("● Transmitindo · {}{mode_str}", share.preset.label),
+                    format!("Transmitindo · {}{mode_str}", share.preset.label),
                 );
 
                 if share.audio_mode != AudioMode::None {
@@ -108,6 +109,8 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                 }
 
                 if share.audio_mode == AudioMode::Native && ui.button("Apps bloqueados").clicked() {
+                    let blocked = snap.settings.blocked_apps.clone();
+                    app.audio_apps = app.rt.block_on(app.session.list_audio_apps(&blocked));
                     app.show_audio_popover = !app.show_audio_popover;
                 }
 
@@ -141,15 +144,15 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
             ui.separator();
             for p in &snap.peers {
                 ui.horizontal(|ui| {
+                    if p.sharing {
+                        draw_live_dot(ui);
+                    }
                     let suffix = if p.is_local { " (você)" } else { "" };
                     ui.label(format!("{}{suffix}", p.name));
                     if p.is_host {
-                        ui.label("👑");
+                        ui.colored_label(Color32::from_rgb(250, 200, 80), "[Host]");
                     } else if p.can_host == Some(true) {
-                        ui.colored_label(Color32::from_rgb(130, 200, 255), "reserva");
-                    }
-                    if p.sharing {
-                        ui.colored_label(Color32::from_rgb(100, 230, 140), "●");
+                        ui.colored_label(Color32::from_rgb(130, 200, 255), "[Reserva]");
                     }
                 });
             }
@@ -207,10 +210,11 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            draw_live_dot(ui);
                             let label = if stream.is_local {
-                                "● Você".to_string()
+                                "Você".to_string()
                             } else {
-                                format!("● {}", stream.name)
+                                stream.name.clone()
                             };
                             if ui.selectable_label(is_focused, RichText::new(label).strong()).clicked() {
                                 app.focused_id = Some(stream.identity.clone());
@@ -282,9 +286,53 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
         }
     });
 
+    if app.show_audio_popover {
+        let mut open = app.show_audio_popover;
+        let mut blocked = snap.settings.blocked_apps.clone();
+        let mut changed = false;
+        egui::Window::new("Apps bloqueados")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .min_width(320.0)
+            .show(ctx, |ui| {
+                if app.audio_apps.is_empty() {
+                    ui.label("Nenhum app com áudio ativo no momento.");
+                } else {
+                    for entry in &app.audio_apps {
+                        let mut is_blocked = blocked.iter().any(|b| b == &entry.exe);
+                        if ui
+                            .checkbox(&mut is_blocked, format!("{} ({})", entry.name, entry.exe))
+                            .changed()
+                        {
+                            if is_blocked {
+                                blocked.push(entry.exe.clone());
+                            } else {
+                                blocked.retain(|b| b != &entry.exe);
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+            });
+        if changed {
+            let session = app.session.clone();
+            app.rt.spawn(async move {
+                session.set_blocked_apps(blocked).await;
+            });
+        }
+        app.show_audio_popover = open;
+    }
+
     if app.show_share_dialog {
         share_dialog::render_share_dialog(app, ctx);
     }
+}
+
+fn draw_live_dot(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), 4.5, Color32::from_rgb(80, 220, 120));
 }
 
 fn ports_warning(snap: &ct_media::session::SessionSnapshot) -> Option<&'static str> {
