@@ -1,0 +1,32 @@
+[package]
+name = "ct-media"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+livekit-rtc = ["dep:livekit"]
+
+[dependencies]
+ct-core.workspace = true
+ct-host.workspace = true
+ct-net.workspace = true
+livekit = { version = "0.7", optional = true }
+reqwest.workspace = true
+ringbuf.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }

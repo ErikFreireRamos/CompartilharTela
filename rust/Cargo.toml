@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ct-core",
+    "crates/ct-net",
+    "crates/ct-host",
+    "crates/ct-media",
+    "crates/ct-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+axum = { version = "0.8", features = ["ws"] }
+bytes = "1"
+directories = "6"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+egui = "0.31"
+futures-util = "0.3"
+if-addrs = "0.13"
+jsonwebtoken = "9"
+quick-xml = "0.37"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ringbuf = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = { version = "0.5", features = ["all"] }
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+ct-core = { path = "crates/ct-core" }
+ct-net = { path = "crates/ct-net" }
+ct-host = { path = "crates/ct-host" }
+ct-media = { path = "crates/ct-media" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
