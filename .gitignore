@@ -4,3 +4,5 @@ dist/
 *.log
 app/resources/bin/*.exe
 native/audio-capture/build/
+rust/target/
+
