@@ -5,7 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::protocol::{ContentType, QualityId};
+use crate::protocol::{
+    AudioQualityId, ContentType, QualityId, RECOMMENDED_AUDIO_QUALITY, RECOMMENDED_FPS,
+    RECOMMENDED_RESOLUTION,
+};
 
 pub const DEFAULT_BLOCKED_APPS: &[&str] = &[
     "discord.exe",
@@ -13,6 +16,10 @@ pub const DEFAULT_BLOCKED_APPS: &[&str] = &[
     "discordcanary.exe",
     "vesktop.exe",
 ];
+
+fn default_fps() -> u32 {
+    RECOMMENDED_FPS
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +29,12 @@ pub struct Settings {
     pub blocked_apps: Vec<String>,
     pub volumes: HashMap<String, f32>,
     pub quality: QualityId,
+    #[serde(default = "default_fps")]
+    pub fps: u32,
+    #[serde(default)]
+    pub audio_quality: AudioQualityId,
+    #[serde(default)]
+    pub gpu_adapter_index: Option<u32>,
     pub content_type: ContentType,
     pub share_audio: bool,
     pub send_volume: f32,
@@ -34,7 +47,10 @@ impl Default for Settings {
             nickname: String::new(),
             blocked_apps: DEFAULT_BLOCKED_APPS.iter().map(|s| (*s).to_string()).collect(),
             volumes: HashMap::new(),
-            quality: QualityId::P1080F30,
+            quality: RECOMMENDED_RESOLUTION.to_quality_id(RECOMMENDED_FPS),
+            fps: RECOMMENDED_FPS,
+            audio_quality: RECOMMENDED_AUDIO_QUALITY,
+            gpu_adapter_index: None,
             content_type: ContentType::Motion,
             share_audio: true,
             send_volume: 1.0,

@@ -176,9 +176,15 @@ fn run_dummy_capture_loop(
 // Reprodução de Áudio Remoto (Mixer Multi-Stream WASAPI)
 // ============================================================================
 
+/// 60 ms de buffer de jitter antes de iniciar reprodução (elimina engasgos de rede).
+const PLAYBACK_PRIME_SAMPLES: usize = (AUDIO_SAMPLE_RATE as usize * 60 / 1000) * AUDIO_CHANNELS;
+/// 180 ms máximo antes de descartar excesso (evita atraso crescente por deriva de relógio).
+const PLAYBACK_MAX_SAMPLES: usize = (AUDIO_SAMPLE_RATE as usize * 180 / 1000) * AUDIO_CHANNELS;
+
 struct PeerAudioQueue {
     samples: VecDeque<f32>,
     volume: f32,
+    primed: bool,
 }
 
 struct PlaybackShared {
@@ -186,7 +192,7 @@ struct PlaybackShared {
 }
 
 /// Reproduz áudio recebido de todos os participantes remotos via WASAPI `IAudioRenderClient`,
-/// aplicando o volume individual de cada participante (0%–200%).
+/// com jitter buffer pré-carregado (60 ms) e volume individual por participante (0%–200%).
 pub struct AudioPlaybackMixer {
     running: Arc<AtomicBool>,
     shared: Arc<PlaybackShared>,
@@ -228,18 +234,21 @@ impl AudioPlaybackMixer {
     }
 
     pub fn push_samples(&self, identity: &str, samples: &[f32], volume: f32) {
-        const MAX_BUFFERED_SAMPLES: usize = (AUDIO_SAMPLE_RATE as usize / 6) * AUDIO_CHANNELS; // ~166 ms
         if let Ok(mut map) = self.shared.peers.lock() {
             let entry = map
                 .entry(identity.to_string())
                 .or_insert_with(|| PeerAudioQueue {
-                    samples: VecDeque::with_capacity(MAX_BUFFERED_SAMPLES),
+                    samples: VecDeque::with_capacity(PLAYBACK_MAX_SAMPLES),
                     volume,
+                    primed: false,
                 });
             entry.volume = volume.clamp(0.0, 2.0);
             entry.samples.extend(samples.iter().copied());
-            if entry.samples.len() > MAX_BUFFERED_SAMPLES {
-                let drop_count = entry.samples.len() - (AUDIO_CHUNK_SAMPLES * 2);
+            if !entry.primed && entry.samples.len() >= PLAYBACK_PRIME_SAMPLES {
+                entry.primed = true;
+            }
+            if entry.samples.len() > PLAYBACK_MAX_SAMPLES {
+                let drop_count = entry.samples.len() - PLAYBACK_PRIME_SAMPLES;
                 entry.samples.drain(..drop_count);
             }
         }
@@ -779,10 +788,11 @@ mod win_audio {
 
         fn mix_into(&self, out: &mut [f32]) {
             if let Ok(mut q) = self.ring.lock() {
-                if q.len() < out.len() {
+                if q.is_empty() {
                     return;
                 }
-                for slot in out.iter_mut() {
+                let take = out.len().min(q.len());
+                for slot in out.iter_mut().take(take) {
                     if let Some(v) = q.pop_front() {
                         *slot += v;
                     }
@@ -1051,28 +1061,42 @@ mod win_audio {
 
                 let mut task_idx = 0u32;
                 let task =
-                    AvSetMmThreadCharacteristicsW(windows::core::w!("Audio"), &mut task_idx).ok();
+                    AvSetMmThreadCharacteristicsW(windows::core::w!("Pro Audio"), &mut task_idx)
+                        .ok();
 
+                const STEP_FRAMES: u32 = 480; // 10 ms @ 48 kHz
                 while running.load(Ordering::Relaxed) {
                     let Ok(padding) = client.GetCurrentPadding() else {
-                        thread::sleep(Duration::from_millis(5));
+                        thread::sleep(Duration::from_millis(4));
                         continue;
                     };
-                    let avail = buf_frames.saturating_sub(padding);
-                    if avail >= 240 {
-                        if let Ok(ptr) = render.GetBuffer(avail) {
-                            let total = (avail as usize) * AUDIO_CHANNELS;
+                    let mut avail = buf_frames.saturating_sub(padding);
+                    while avail >= STEP_FRAMES && running.load(Ordering::Relaxed) {
+                        let write_frames = STEP_FRAMES;
+                        if let Ok(ptr) = render.GetBuffer(write_frames) {
+                            let total = (write_frames as usize) * AUDIO_CHANNELS;
                             let out = std::slice::from_raw_parts_mut(ptr as *mut f32, total);
                             out.fill(0.0);
 
                             if let Ok(mut map) = shared.peers.lock() {
                                 for peer in map.values_mut() {
-                                    let vol = peer.volume;
-                                    if peer.samples.is_empty() {
+                                    if !peer.primed {
                                         continue;
                                     }
-                                    let take = total.min(peer.samples.len());
-                                    for slot in out.iter_mut().take(take) {
+                                    let vol = peer.volume;
+                                    if peer.samples.len() < total {
+                                        // Underrun: aplica fade-out suave e volta a fazer priming
+                                        let rem = peer.samples.len();
+                                        for i in 0..rem {
+                                            if let Some(s) = peer.samples.pop_front() {
+                                                let fade = 1.0 - (i as f32 / rem.max(1) as f32);
+                                                out[i] += s * vol * fade;
+                                            }
+                                        }
+                                        peer.primed = false;
+                                        continue;
+                                    }
+                                    for slot in out.iter_mut() {
                                         if let Some(s) = peer.samples.pop_front() {
                                             *slot += s * vol;
                                         }
@@ -1082,10 +1106,13 @@ mod win_audio {
                             for s in out.iter_mut() {
                                 *s = s.clamp(-1.0, 1.0);
                             }
-                            let _ = render.ReleaseBuffer(avail, 0);
+                            let _ = render.ReleaseBuffer(write_frames, 0);
+                            avail -= write_frames;
+                        } else {
+                            break;
                         }
                     }
-                    thread::sleep(Duration::from_millis(5));
+                    thread::sleep(Duration::from_millis(3));
                 }
 
                 let _ = client.Stop();

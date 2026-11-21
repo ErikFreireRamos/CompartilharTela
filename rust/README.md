@@ -1,29 +1,17 @@
-# CompartilhadorDeTela (Rust Native)
+# CompartilhadorDeTela (Rust P2P Native)
 
-Pure Rust native rewrite of CompartilhadorDeTela targeting Windows 10 (2004+) / Windows 11 with `eframe`/`egui` + `wgpu`, native Win32/WASAPI/DXGI APIs, and the embedded `livekit-server.exe` sidecar.
+Aplicativo nativo em Rust para transmissão de tela com áudio por aplicativo entre amigos via **Iroh P2P (QUIC)** — sem abrir portas no roteador, compatível com CGNAT e com troca automática de host.
 
-## Workspace Layout
+## Arquitetura do Workspace
 
-- `crates/ct-core` — Protocol constants, Crockford Base32 room codes (IPv4/IPv6), deterministic host failover election, and atomic JSON settings store.
-- `crates/ct-net` — Async STUN (RFC 5389), UPnP IGD (SSDP + `quick-xml` + SOAP), LAN UDP discovery (`7883`), native Win32 `GetAdaptersAddresses` (stable IPv6) and `GetTokenInformation` (elevation check).
-- `crates/ct-host` — `axum` public server on `TCP 7880` (`/probe`, `/api/join`, HTTP & WebSocket proxy), UDP `7882` probe responder, `livekit-server` sidecar manager (with Win32 Job Object cleanup), LiveKit JWT minting, and Twirp RoomService client.
-- `crates/ct-media` — In-process WASAPI audio capture with lock-free `ringbuf` (`48 kHz` stereo), monitor enumeration & screen capture, and `RoomSession` async state machine.
-- `crates/ct-app` — Native `eframe`/`egui` + `wgpu` desktop application (`compartilhador-de-tela`).
+- `crates/ct-core` — Protocolo P2P, codecs de áudio (IMA-ADPCM 4:1, PCM 16-bit e resampler estéreo), qualidades independentes de vídeo/FPS/áudio e armazenamento atômico de configurações.
+- `crates/ct-media` — Transporte Iroh P2P (`VideoMailbox` sem descarte de keyframes, streams ordenados de vídeo/áudio e handoff automático de host), captura nativa Windows DXGI Desktop Duplication (com seleção de GPU e fallback GDI), captura WASAPI por aplicativo com bloqueio ao vivo e mixer WASAPI com jitter buffer.
+- `crates/ct-app` — Interface nativa `eframe`/`egui` (`glow`) com layout Destaque/Grade, tela cheia, janelas separadas (pop-out), aba lateral de participantes minimizável e controles ao vivo de resolução, FPS, áudio e apps bloqueados.
 
-## Build & Test
+## Como compilar e testar
 
 ```bash
 cd rust
 cargo test --workspace
-cargo build --release
+cargo build --release --bin compartilhador-de-tela
 ```
-
-### Enabling the LiveKit WebRTC Client (`livekit-rtc`)
-
-On Windows (with MSVC Build Tools installed), enable the `livekit-rtc` feature in `ct-media` to link `libwebrtc`:
-
-```bash
-cargo build --release --features ct-media/livekit-rtc
-```
-
-Place `livekit-server.exe` in `bin/` next to the compiled `compartilhador-de-tela.exe` (or run `npm run setup:livekit` in `../app` and copy `app/resources/bin/livekit-server.exe`).

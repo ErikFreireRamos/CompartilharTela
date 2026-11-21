@@ -1,18 +1,16 @@
-use ct_core::protocol::RoomMode;
-use ct_core::room_code::format_room_code_input;
 use ct_media::p2p::is_iroh_ticket;
 use ct_media::session::Phase;
 use egui::{Align, Color32, Context, Layout, RichText, Stroke};
 
 use super::{
-    ACCENT_DANGER, ACCENT_PRIMARY, BG_CARD, BORDER_SUBTLE, CompartilharApp, TEXT_MUTED,
+    ACCENT_DANGER, ACCENT_GREEN, BG_CARD, BORDER_SUBTLE, CompartilharApp, TEXT_MUTED,
     primary_button, render_admin_warning,
 };
 
 pub fn render_home(app: &mut CompartilharApp, ctx: &Context) {
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.vertical_centered(|ui| {
-            ui.add_space(42.0);
+            ui.add_space(46.0);
             ui.label(
                 RichText::new("CompartilhadorDeTela")
                     .size(32.0)
@@ -21,9 +19,11 @@ pub fn render_home(app: &mut CompartilharApp, ctx: &Context) {
             );
             ui.add_space(4.0);
             ui.label(
-                RichText::new("Transmita sua tela com áudio por aplicativo para até 10 amigos")
-                    .size(15.0)
-                    .color(TEXT_MUTED),
+                RichText::new(
+                    "Transmissão P2P direta de tela e áudio por app para até 10 amigos — sem abrir portas",
+                )
+                .size(15.0)
+                .color(TEXT_MUTED),
             );
             ui.add_space(28.0);
 
@@ -77,7 +77,7 @@ pub fn render_home(app: &mut CompartilharApp, ctx: &Context) {
                     let connecting = app.snap.phase == Phase::Connecting;
 
                     ui.columns(2, |cols| {
-                        // Card: Criar sala
+                        // Card: Criar sala P2P
                         egui::Frame::NONE
                             .fill(BG_CARD)
                             .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
@@ -85,43 +85,15 @@ pub fn render_home(app: &mut CompartilharApp, ctx: &Context) {
                             .inner_margin(18.0)
                             .show(&mut cols[0], |ui| {
                                 ui.label(RichText::new("Criar nova sala").size(18.0).strong());
-                                ui.add_space(4.0);
+                                ui.add_space(8.0);
                                 ui.label(
-                                    RichText::new("Escolha o tipo de conexão da sala:")
-                                        .color(TEXT_MUTED)
-                                        .size(13.0),
+                                    RichText::new(
+                                        "Cria uma sala P2P instantânea via Iroh (QUIC). Funciona com CGNAT, sem precisar abrir portas no roteador e com troca automática de host.",
+                                    )
+                                    .color(TEXT_MUTED)
+                                    .size(13.0),
                                 );
-                                ui.add_space(10.0);
-
-                                let iroh_selected = app.create_mode == RoomMode::Iroh;
-                                ui.selectable_label(
-                                    iroh_selected,
-                                    RichText::new("P2P Direto (Iroh) — Recomendado").strong(),
-                                )
-                                .clicked()
-                                .then(|| app.create_mode = RoomMode::Iroh);
-                                ui.label(
-                                    RichText::new("  Funciona com CGNAT, sem abrir portas.")
-                                        .size(12.0)
-                                        .color(TEXT_MUTED),
-                                );
-
-                                ui.add_space(6.0);
-
-                                let classic_selected = app.create_mode == RoomMode::Classic;
-                                ui.selectable_label(
-                                    classic_selected,
-                                    RichText::new("Clássico (LiveKit)").strong(),
-                                )
-                                .clicked()
-                                .then(|| app.create_mode = RoomMode::Classic);
-                                ui.label(
-                                    RichText::new("  Compatível com o app Electron antigo.")
-                                        .size(12.0)
-                                        .color(TEXT_MUTED),
-                                );
-
-                                ui.add_space(16.0);
+                                ui.add_space(28.0);
                                 let btn = ui.add_enabled(
                                     !name.is_empty() && !connecting,
                                     primary_button(if connecting {
@@ -129,22 +101,21 @@ pub fn render_home(app: &mut CompartilharApp, ctx: &Context) {
                                     } else {
                                         "Criar sala"
                                     })
-                                    .min_size(egui::vec2(ui.available_width(), 38.0)),
+                                    .min_size(egui::vec2(ui.available_width(), 40.0)),
                                 );
                                 if btn.clicked() {
                                     let session = app.session.clone();
                                     let nick = name.clone();
-                                    let mode = app.create_mode;
                                     app.rt.spawn(async move {
                                         session
                                             .update_settings(|s| s.nickname = nick.clone())
                                             .await;
-                                        session.create_room(nick, mode).await;
+                                        session.create_room(nick).await;
                                     });
                                 }
                             });
 
-                        // Card: Entrar em sala
+                        // Card: Entrar em sala P2P
                         egui::Frame::NONE
                             .fill(BG_CARD)
                             .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
@@ -152,49 +123,46 @@ pub fn render_home(app: &mut CompartilharApp, ctx: &Context) {
                             .inner_margin(18.0)
                             .show(&mut cols[1], |ui| {
                                 ui.label(RichText::new("Entrar em sala").size(18.0).strong());
-                                ui.add_space(4.0);
+                                ui.add_space(8.0);
                                 ui.label(
-                                    RichText::new("Cole o código recebido do seu amigo (Iroh P2P ou Clássico).")
+                                    RichText::new("Cole o código P2P (IROH-...) enviado pelo seu amigo.")
                                         .color(TEXT_MUTED)
                                         .size(13.0),
                                 );
-                                ui.add_space(12.0);
-                                let code_resp = ui.add(
+                                ui.add_space(10.0);
+                                ui.add(
                                     egui::TextEdit::singleline(&mut app.code_input)
-                                        .hint_text("IROH-... ou XXXX-XXXX-XXXX")
+                                        .hint_text("IROH-...")
                                         .desired_width(f32::INFINITY)
                                         .margin(egui::vec2(10.0, 8.0)),
                                 );
-                                if code_resp.changed() && !is_iroh_ticket(&app.code_input) {
-                                    let trimmed = app.code_input.trim();
-                                    if !trimmed.to_ascii_uppercase().starts_with("IROH") {
-                                        app.code_input = format_room_code_input(trimmed);
-                                    }
-                                }
-                                let is_iroh = is_iroh_ticket(&app.code_input)
+                                let code_valid = is_iroh_ticket(&app.code_input)
                                     && app.code_input.trim().len() > 16;
-                                let raw_len = app.code_input.replace('-', "").len();
-                                let code_complete = is_iroh || raw_len == 12 || raw_len == 32;
 
-                                ui.add_space(8.0);
-                                let hint = if is_iroh {
-                                    ("Ticket P2P (Iroh) detectado", ACCENT_PRIMARY)
-                                } else if raw_len == 12 || raw_len == 32 {
-                                    ("Código Clássico detectado", ACCENT_PRIMARY)
+                                ui.add_space(6.0);
+                                if code_valid {
+                                    ui.label(
+                                        RichText::new("Código P2P válido")
+                                            .size(12.0)
+                                            .color(ACCENT_GREEN),
+                                    );
                                 } else {
-                                    ("Aguardando código completo...", TEXT_MUTED)
-                                };
-                                ui.label(RichText::new(hint.0).size(12.0).color(hint.1));
+                                    ui.label(
+                                        RichText::new("Cole o código completo começando com IROH-")
+                                            .size(12.0)
+                                            .color(TEXT_MUTED),
+                                    );
+                                }
 
-                                ui.add_space(28.0);
+                                ui.add_space(16.0);
                                 let btn = ui.add_enabled(
-                                    !name.is_empty() && code_complete && !connecting,
+                                    !name.is_empty() && code_valid && !connecting,
                                     primary_button(if connecting {
                                         "Entrando…"
                                     } else {
                                         "Entrar na sala"
                                     })
-                                    .min_size(egui::vec2(ui.available_width(), 38.0)),
+                                    .min_size(egui::vec2(ui.available_width(), 40.0)),
                                 );
                                 if btn.clicked() {
                                     let session = app.session.clone();

@@ -1,8 +1,8 @@
-//! Enumeração de monitores, captura de tela nativa no Windows (DXGI Desktop Duplication
-//! com fallback GDI BitBlt), alteração ao vivo de resolução/FPS, detecção de região alterada
-//! (dirty-rect) e codificação/decodificação JPEG 4:2:0 rápida.
+//! Enumeração de monitores e GPUs disponíveis, captura de tela nativa no Windows
+//! (DXGI Desktop Duplication com escolha de GPU + fallback GDI BitBlt), alteração ao vivo
+//! de resolução/FPS, detecção de região alterada (dirty-rect) e codificação JPEG 4:2:0.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -11,6 +11,13 @@ use std::time::Instant;
 
 use ct_core::protocol::{ResolutionId, VideoPacketHeader};
 use tokio::sync::watch;
+
+/// Sequência global monotônica de frames (nunca volta para 1 ao reiniciar a transmissão!).
+static NEXT_FRAME_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_seq() -> u64 {
+    NEXT_FRAME_SEQ.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenSource {
@@ -23,11 +30,17 @@ pub struct ScreenSource {
     pub monitor_index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuAdapterInfo {
+    /// `None` = automática (GPU conectada ao monitor escolhido).
+    pub index: Option<u32>,
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct CapturedVideoFrame {
     pub width: u32,
     pub height: u32,
-    /// Pixels RGBA8 prontos para upload em textura GPU.
     pub rgba: Arc<Vec<u8>>,
     pub seq: u64,
 }
@@ -48,6 +61,51 @@ impl LiveCaptureConfig {
             fps: fps.clamp(5, 60),
         }
     }
+}
+
+/// Lista as GPUs DXGI disponíveis no PC (útil em notebooks híbridos ou PCs com 2+ GPUs).
+pub fn list_gpu_adapters() -> Vec<GpuAdapterInfo> {
+    #[allow(unused_mut)]
+    let mut out = vec![GpuAdapterInfo {
+        index: None,
+        name: "Automática (GPU do monitor)".to_string(),
+    }];
+
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::Dxgi::{
+            CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1,
+        };
+        unsafe {
+            if let Ok(factory) = CreateDXGIFactory1::<IDXGIFactory1>() {
+                let mut idx = 0u32;
+                while let Ok(adapter) = factory.EnumAdapters1(idx) {
+                    if let Ok(desc) = adapter.GetDesc1() {
+                        let is_sw = (desc.Flags & (DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32)) != 0;
+                        if !is_sw {
+                            let end = desc
+                                .Description
+                                .iter()
+                                .position(|&c| c == 0)
+                                .unwrap_or(desc.Description.len());
+                            let name = String::from_utf16_lossy(&desc.Description[..end])
+                                .trim()
+                                .to_string();
+                            if !name.is_empty() {
+                                out.push(GpuAdapterInfo {
+                                    index: Some(idx),
+                                    name: format!("GPU {idx}: {name}"),
+                                });
+                            }
+                        }
+                    }
+                    idx += 1;
+                }
+            }
+        }
+    }
+
+    out
 }
 
 pub fn list_screen_sources() -> Vec<ScreenSource> {
@@ -135,7 +193,11 @@ pub struct ScreenCapturer {
 }
 
 impl ScreenCapturer {
-    pub fn start(source_id: String, initial_cfg: LiveCaptureConfig) -> Self {
+    pub fn start(
+        source_id: String,
+        initial_cfg: LiveCaptureConfig,
+        gpu_adapter_index: Option<u32>,
+    ) -> Self {
         let running = Arc::new(AtomicBool::new(true));
         let config = Arc::new(RwLock::new(initial_cfg));
         let (tx, rx) = watch::channel(None);
@@ -165,10 +227,11 @@ impl ScreenCapturer {
             .spawn(move || {
                 #[cfg(windows)]
                 {
-                    capture_loop_windows(source, cfg_ref, run_flag, tx);
+                    capture_loop_windows(source, cfg_ref, gpu_adapter_index, run_flag, tx);
                 }
                 #[cfg(not(windows))]
                 {
+                    let _ = gpu_adapter_index;
                     capture_loop_fallback(cfg_ref, run_flag, tx);
                 }
             })
@@ -182,7 +245,6 @@ impl ScreenCapturer {
         }
     }
 
-    /// Atualiza resolução e FPS ao vivo sem reiniciar a transmissão.
     pub fn update_config(&self, cfg: LiveCaptureConfig) {
         if let Ok(mut guard) = self.config.write() {
             *guard = cfg;
@@ -207,7 +269,6 @@ impl Drop for ScreenCapturer {
     }
 }
 
-/// Dimensão final preservando proporção (par para melhor subamostragem 4:2:0).
 fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     if src_w == 0 || src_h == 0 {
         return (max_w.max(2) & !1, max_h.max(2) & !1);
@@ -221,7 +282,6 @@ fn fit_dimensions(src_w: u32, src_h: u32, max_w: u32, max_h: u32) -> (u32, u32) 
     (w, h)
 }
 
-/// Converte BGRA (Windows D3D11/GDI) para RGBA e faz downsample se necessário.
 #[cfg(windows)]
 fn convert_bgra_to_rgba_scaled(
     src: &[u8],
@@ -271,10 +331,11 @@ fn convert_bgra_to_rgba_scaled(
 fn capture_loop_windows(
     source: ScreenSource,
     config: Arc<RwLock<LiveCaptureConfig>>,
+    gpu_adapter_index: Option<u32>,
     running: Arc<AtomicBool>,
     tx: watch::Sender<Option<CapturedVideoFrame>>,
 ) {
-    if let Err(err) = capture_loop_dxgi(&source, &config, &running, &tx) {
+    if let Err(err) = capture_loop_dxgi(&source, &config, gpu_adapter_index, &running, &tx) {
         tracing::warn!("DXGI Desktop Duplication indisponível ({err}); usando fallback GDI BitBlt");
         if running.load(Ordering::Relaxed) {
             capture_loop_gdi(&source, &config, &running, &tx);
@@ -286,6 +347,7 @@ fn capture_loop_windows(
 fn capture_loop_dxgi(
     source: &ScreenSource,
     config: &Arc<RwLock<LiveCaptureConfig>>,
+    preferred_gpu: Option<u32>,
     running: &Arc<AtomicBool>,
     tx: &watch::Sender<Option<CapturedVideoFrame>>,
 ) -> Result<(), String> {
@@ -296,8 +358,8 @@ fn capture_loop_dxgi(
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
     };
     use windows::Win32::Graphics::Dxgi::{
-        CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIFactory1,
-        IDXGIOutput1,
+        CreateDXGIFactory1, DXGI_ERROR_WAIT_TIMEOUT, DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1,
+        IDXGIFactory1, IDXGIOutput1,
     };
     use windows::core::Interface;
 
@@ -305,36 +367,43 @@ fn capture_loop_dxgi(
         let factory: IDXGIFactory1 =
             CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
 
-        let mut matched: Option<(windows::Win32::Graphics::Dxgi::IDXGIAdapter1, IDXGIOutput1)> =
-            None;
-        let mut fallback_first: Option<(
-            windows::Win32::Graphics::Dxgi::IDXGIAdapter1,
-            IDXGIOutput1,
-        )> = None;
+        let mut preferred_match: Option<(IDXGIAdapter1, IDXGIOutput1)> = None;
+        let mut exact_match: Option<(IDXGIAdapter1, IDXGIOutput1)> = None;
+        let mut preferred_any: Option<(IDXGIAdapter1, IDXGIOutput1)> = None;
+        let mut fallback_first: Option<(IDXGIAdapter1, IDXGIOutput1)> = None;
 
         let mut adapter_idx = 0u32;
         while let Ok(adapter) = factory.EnumAdapters1(adapter_idx) {
+            let is_pref = preferred_gpu == Some(adapter_idx);
             let mut output_idx = 0u32;
             while let Ok(output) = adapter.EnumOutputs(output_idx) {
                 if let (Ok(desc), Ok(output1)) = (output.GetDesc(), output.cast::<IDXGIOutput1>()) {
                     let r = desc.DesktopCoordinates;
+                    let coords_match = r.left == source.left && r.top == source.top;
                     if fallback_first.is_none() {
                         fallback_first = Some((adapter.clone(), output1.clone()));
                     }
-                    if r.left == source.left && r.top == source.top {
-                        matched = Some((adapter.clone(), output1));
-                        break;
+                    if is_pref && preferred_any.is_none() {
+                        preferred_any = Some((adapter.clone(), output1.clone()));
+                    }
+                    if coords_match {
+                        if is_pref {
+                            preferred_match = Some((adapter.clone(), output1.clone()));
+                        }
+                        if exact_match.is_none() {
+                            exact_match = Some((adapter.clone(), output1));
+                        }
                     }
                 }
                 output_idx += 1;
             }
-            if matched.is_some() {
-                break;
-            }
             adapter_idx += 1;
         }
 
-        let (adapter, output1) = matched
+        // Prioridade: GPU escolhida com o monitor exato -> monitor exato na GPU dona -> GPU escolhida -> primeiro monitor
+        let (adapter, output1) = preferred_match
+            .or(exact_match)
+            .or(preferred_any)
             .or(fallback_first)
             .ok_or_else(|| "Nenhum monitor DXGI encontrado".to_string())?;
 
@@ -362,7 +431,8 @@ fn capture_loop_dxgi(
 
         let mut staging: Option<ID3D11Texture2D> = None;
         let mut staging_size = (0u32, 0u32);
-        let mut seq = 0u64;
+        let mut local_count = 0u64;
+        let mut last_sent_cfg = (0u32, 0u32);
 
         while running.load(Ordering::Relaxed) {
             let cfg = *config.read().unwrap();
@@ -370,10 +440,12 @@ fn capture_loop_dxgi(
             let started = Instant::now();
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource = None;
+            let cfg_changed = last_sent_cfg != (cfg.max_width, cfg.max_height);
 
             match duplication.AcquireNextFrame(100, &mut frame_info, &mut resource) {
                 Ok(()) => {
-                    let has_new_image = seq == 0
+                    let has_new_image = local_count == 0
+                        || cfg_changed
                         || frame_info.LastPresentTime != 0
                         || frame_info.AccumulatedFrames > 0;
                     if has_new_image
@@ -429,12 +501,13 @@ fn capture_loop_dxgi(
                                         dst_w,
                                         dst_h,
                                     );
-                                    seq += 1;
+                                    local_count += 1;
+                                    last_sent_cfg = (cfg.max_width, cfg.max_height);
                                     let _ = tx.send(Some(CapturedVideoFrame {
                                         width: dst_w,
                                         height: dst_h,
                                         rgba: Arc::new(rgba),
-                                        seq,
+                                        seq: next_seq(),
                                     }));
                                 }
                                 context.Unmap(st_tex, 0);
@@ -443,7 +516,40 @@ fn capture_loop_dxgi(
                     }
                     let _ = duplication.ReleaseFrame();
                 }
-                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {}
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    // Se o usuário mudou a resolução ao vivo com a tela parada, re-emite o staging atual!
+                    if cfg_changed && let Some(ref st_tex) = staging {
+                        let (sw, sh) = staging_size;
+                        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+                        if context
+                            .Map(st_tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                            .is_ok()
+                        {
+                            let pitch = mapped.RowPitch as usize;
+                            let row_bytes = (sw as usize) * 4;
+                            if !mapped.pData.is_null() && pitch >= row_bytes && sh > 0 {
+                                let total_bytes = pitch * (sh as usize);
+                                let slice = std::slice::from_raw_parts(
+                                    mapped.pData as *const u8,
+                                    total_bytes,
+                                );
+                                let (dst_w, dst_h) =
+                                    fit_dimensions(sw, sh, cfg.max_width, cfg.max_height);
+                                let rgba = convert_bgra_to_rgba_scaled(
+                                    slice, pitch, sw, sh, dst_w, dst_h,
+                                );
+                                last_sent_cfg = (cfg.max_width, cfg.max_height);
+                                let _ = tx.send(Some(CapturedVideoFrame {
+                                    width: dst_w,
+                                    height: dst_h,
+                                    rgba: Arc::new(rgba),
+                                    seq: next_seq(),
+                                }));
+                            }
+                            context.Unmap(st_tex, 0);
+                        }
+                    }
+                }
                 Err(e) => {
                     return Err(format!("AcquireNextFrame: {e}"));
                 }
@@ -470,8 +576,6 @@ fn capture_loop_gdi(
         DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HALFTONE, ReleaseDC, SRCCOPY, SelectObject,
         SetStretchBltMode, StretchBlt,
     };
-
-    let mut seq = 0u64;
 
     unsafe {
         let screen_dc = GetDC(None);
@@ -562,12 +666,11 @@ fn capture_loop_gdi(
             if ok && !bits_ptr.is_null() {
                 let slice = std::slice::from_raw_parts(bits_ptr as *const u8, total);
                 let rgba = convert_bgra_to_rgba_scaled(slice, pitch, dst_w, dst_h, dst_w, dst_h);
-                seq += 1;
                 let _ = tx.send(Some(CapturedVideoFrame {
                     width: dst_w,
                     height: dst_h,
                     rgba: Arc::new(rgba),
-                    seq,
+                    seq: next_seq(),
                 }));
             }
 
@@ -594,12 +697,10 @@ fn capture_loop_fallback(
     running: Arc<AtomicBool>,
     tx: watch::Sender<Option<CapturedVideoFrame>>,
 ) {
-    let mut seq = 0u64;
     while running.load(Ordering::Relaxed) {
         let cfg = *config.read().unwrap();
         let frame_interval = Duration::from_secs_f64(1.0 / f64::from(cfg.fps.max(1)));
         let (w, h) = fit_dimensions(1280, 720, cfg.max_width.min(640), cfg.max_height.min(360));
-        seq += 1;
         let mut buf = vec![0u8; (w * h * 4) as usize];
         for chunk in buf.chunks_exact_mut(4) {
             chunk[0] = 36;
@@ -611,7 +712,7 @@ fn capture_loop_fallback(
             width: w,
             height: h,
             rgba: Arc::new(buf),
-            seq,
+            seq: next_seq(),
         }));
         thread::sleep(frame_interval);
     }
@@ -621,8 +722,6 @@ fn capture_loop_fallback(
 // Codificador Delta (Dirty-Rect) + JPEG 4:2:0 e Canvas de Decodificação
 // ============================================================================
 
-/// Mantém o último frame enviado para calcular o retângulo exato alterado (dirty-rect).
-/// Reduz drasticamente banda e CPU quando apenas parte da tela muda.
 pub struct DeltaVideoEncoder {
     prev_w: u32,
     prev_h: u32,
@@ -646,7 +745,6 @@ impl DeltaVideoEncoder {
         }
     }
 
-    /// Codifica o frame atual. Retorna `None` se a tela não mudou nada (exceto keyframe forçado).
     pub fn encode(
         &mut self,
         frame: &CapturedVideoFrame,
@@ -659,16 +757,16 @@ impl DeltaVideoEncoder {
             return None;
         }
 
-        let size_changed = self.prev_w != w || self.prev_h != h || self.prev_rgba.len() != frame.rgba.len();
-        let need_key = force_keyframe || size_changed || self.frames_since_key >= 90;
+        let size_changed =
+            self.prev_w != w || self.prev_h != h || self.prev_rgba.len() != frame.rgba.len();
+        let need_key = force_keyframe || size_changed || self.frames_since_key >= 60;
 
         let (rx, ry, rw, rh, is_key) = if need_key {
             (0, 0, w, h, true)
         } else {
             match find_dirty_rect(&self.prev_rgba, &frame.rgba, w, h) {
-                None => return None, // tela 100% idêntica
+                None => return None,
                 Some((x, y, rw, rh)) => {
-                    // Se mais de 65% da tela mudou, manda keyframe direto
                     if u64::from(rw) * u64::from(rh) * 100 >= u64::from(w) * u64::from(h) * 65 {
                         (0, 0, w, h, true)
                     } else {
@@ -712,7 +810,6 @@ fn find_dirty_rect(prev: &[u8], cur: &[u8], w: u32, h: u32) -> Option<(u32, u32,
     let mut max_x = 0usize;
     let mut max_y = 0usize;
 
-    // Compara linhas inteiras rápido; só inspeciona pixels nas linhas alteradas
     let row_bytes = w_usize * 4;
     for y in 0..h_usize {
         let row_off = y * row_bytes;
@@ -725,7 +822,6 @@ fn find_dirty_rect(prev: &[u8], cur: &[u8], w: u32, h: u32) -> Option<(u32, u32,
             min_y = y;
         }
         max_y = y;
-        // Encontra primeiro e último pixel diferente na linha
         for x in 0..min_x {
             let p = x * 4;
             if prev_row[p..p + 4] != cur_row[p..p + 4] {
@@ -746,13 +842,15 @@ fn find_dirty_rect(prev: &[u8], cur: &[u8], w: u32, h: u32) -> Option<(u32, u32,
         return None;
     }
 
-    // Alinha em múltiplos de 16 (blocos MCU do JPEG 4:2:0) para qualidade limpa
     let x0 = (min_x & !15) as u32;
     let y0 = (min_y & !15) as u32;
     let x1 = ((max_x + 16) & !15).min(w_usize) as u32;
     let y1 = ((max_y + 16) & !15).min(h_usize) as u32;
-    let rw = (x1 - x0).max(2);
-    let rh = (y1 - y0).max(2);
+    let rw = (x1 - x0).max(2).min(w.saturating_sub(x0));
+    let rh = (y1 - y0).max(2).min(h.saturating_sub(y0));
+    if rw == 0 || rh == 0 {
+        return None;
+    }
     Some((x0, y0, rw, rh))
 }
 
@@ -798,8 +896,16 @@ fn encode_region_jpeg(
     Some(out)
 }
 
-/// Canvas persistente no receptor por stream remoto: aplica keyframes e deltas em ordem
-/// estritamente crescente de `seq` (elimina 100% do pisca-pisca / frames fora de ordem).
+#[derive(Debug)]
+pub enum CanvasUpdate {
+    Frame(CapturedVideoFrame),
+    NeedKeyframe,
+    Ignored,
+}
+
+/// Canvas persistente no receptor por stream remoto:
+/// - Keyframes SEMPRE redefinem o canvas (evita travamento ao reiniciar ou mudar resolução).
+/// - Deltas com dimensão diferente ou antes de keyframe pedem novo keyframe automaticamente.
 pub struct RemoteVideoCanvas {
     width: u32,
     height: u32,
@@ -825,15 +931,20 @@ impl RemoteVideoCanvas {
         }
     }
 
-    pub fn apply_packet(&mut self, hdr: VideoPacketHeader, jpeg: &[u8]) -> Option<CapturedVideoFrame> {
-        if hdr.seq <= self.last_seq && self.has_keyframe && hdr.full_width == self.width && hdr.full_height == self.height {
-            return None;
-        }
-        if !hdr.is_keyframe && (!self.has_keyframe || hdr.full_width != self.width || hdr.full_height != self.height) {
-            return None;
+    pub fn apply_packet(&mut self, hdr: VideoPacketHeader, jpeg: &[u8]) -> CanvasUpdate {
+        if !hdr.is_keyframe {
+            if !self.has_keyframe || hdr.full_width != self.width || hdr.full_height != self.height
+            {
+                return CanvasUpdate::NeedKeyframe;
+            }
+            if hdr.seq <= self.last_seq {
+                return CanvasUpdate::Ignored;
+            }
         }
 
-        let img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?;
+        let Ok(img) = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg) else {
+            return CanvasUpdate::NeedKeyframe;
+        };
         let patch = img.to_rgba8();
         let (pw, ph) = patch.dimensions();
         let patch_raw = patch.into_raw();
@@ -852,7 +963,9 @@ impl RemoteVideoCanvas {
             for row in 0..copy_h {
                 let dst_off = ((hdr.y as usize) + row) * full_stride + (hdr.x as usize) * 4;
                 let src_off = row * patch_stride;
-                if dst_off + copy_bytes <= self.rgba.len() && src_off + copy_bytes <= patch_raw.len() {
+                if dst_off + copy_bytes <= self.rgba.len()
+                    && src_off + copy_bytes <= patch_raw.len()
+                {
                     self.rgba[dst_off..dst_off + copy_bytes]
                         .copy_from_slice(&patch_raw[src_off..src_off + copy_bytes]);
                 }
@@ -860,7 +973,7 @@ impl RemoteVideoCanvas {
         }
 
         self.last_seq = hdr.seq;
-        Some(CapturedVideoFrame {
+        CanvasUpdate::Frame(CapturedVideoFrame {
             width: self.width,
             height: self.height,
             rgba: Arc::new(self.rgba.clone()),
@@ -874,7 +987,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn delta_encoder_and_canvas_roundtrip_monotonic() {
+    fn delta_encoder_and_canvas_roundtrip_and_restart() {
         let mut enc = DeltaVideoEncoder::new();
         let mut canvas = RemoteVideoCanvas::new();
 
@@ -882,44 +995,36 @@ mod tests {
             width: 64,
             height: 64,
             rgba: Arc::new(vec![40u8; 64 * 64 * 4]),
-            seq: 1,
+            seq: 100,
         };
         let (h1, j1) = enc.encode(&frame1, 70, true).unwrap();
         assert!(h1.is_keyframe);
-        let out1 = canvas.apply_packet(h1, &j1).unwrap();
-        assert_eq!(out1.seq, 1);
+        assert!(matches!(canvas.apply_packet(h1, &j1), CanvasUpdate::Frame(f) if f.seq == 100));
 
-        // Frame idêntico não envia nada
-        let frame_same = CapturedVideoFrame {
+        // Novo stream com keyframe mesmo se seq menor reinicia o canvas sem travar!
+        let frame_restart = CapturedVideoFrame {
             width: 64,
             height: 64,
-            rgba: frame1.rgba.clone(),
+            rgba: Arc::new(vec![90u8; 64 * 64 * 4]),
+            seq: 1,
+        };
+        let (hr, jr) = enc.encode(&frame_restart, 70, true).unwrap();
+        assert!(matches!(canvas.apply_packet(hr, &jr), CanvasUpdate::Frame(f) if f.seq == 1));
+
+        // Delta com dimensão diferente solicita keyframe automaticamente
+        let bad_delta = VideoPacketHeader {
+            full_width: 128,
+            full_height: 72,
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
             seq: 2,
+            is_keyframe: false,
         };
-        assert!(enc.encode(&frame_same, 70, false).is_none());
-
-        // Altera apenas um bloco pequeno
-        let mut mod_rgba = (*frame1.rgba).clone();
-        for y in 0..8 {
-            for x in 0..8 {
-                let i = (y * 64 + x) * 4;
-                mod_rgba[i] = 240;
-                mod_rgba[i + 3] = 255;
-            }
-        }
-        let frame3 = CapturedVideoFrame {
-            width: 64,
-            height: 64,
-            rgba: Arc::new(mod_rgba),
-            seq: 3,
-        };
-        let (h3, j3) = enc.encode(&frame3, 70, false).unwrap();
-        assert!(!h3.is_keyframe);
-        assert!(h3.width < 64 && h3.height < 64);
-        let out3 = canvas.apply_packet(h3, &j3).unwrap();
-        assert_eq!(out3.seq, 3);
-
-        // Pacote atrasado (seq antigo) é ignorado (nunca pisca!)
-        assert!(canvas.apply_packet(h1, &j1).is_none());
+        assert!(matches!(
+            canvas.apply_packet(bad_delta, &jr),
+            CanvasUpdate::NeedKeyframe
+        ));
     }
 }

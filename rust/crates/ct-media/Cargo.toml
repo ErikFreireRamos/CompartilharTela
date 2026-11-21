@@ -3,26 +3,16 @@ name = "ct-media"
 version.workspace = true
 edition.workspace = true
 
-[features]
-default = []
-livekit-rtc = ["dep:livekit"]
-
 [dependencies]
 base64.workspace = true
 ct-core.workspace = true
-ct-host.workspace = true
-ct-net.workspace = true
-futures-util.workspace = true
 image.workspace = true
 iroh.workspace = true
 jpeg-encoder.workspace = true
-livekit = { version = "0.7", optional = true }
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-tungstenite.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
@@ -37,6 +27,7 @@ windows = { version = "0.62", features = [
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_Media_Multimedia",
+    "Win32_Security",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Diagnostics_ToolHelp",

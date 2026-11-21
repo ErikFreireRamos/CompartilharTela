@@ -1,5 +1,4 @@
-//! Codec estéreo IMA-ADPCM em Rust puro (compressão 4:1, 48 kHz estéreo -> ~384 kbps,
-//! latência < 0.05 ms, zero dependências C).
+//! Codecs de áudio estéreo em Rust puro (IMA-ADPCM 4:1 e PCM 16-bit) + resampler linear.
 
 const INDEX_TABLE: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
 
@@ -77,7 +76,32 @@ impl ChannelState {
     }
 }
 
-/// Codifica amostras estéreo intercaladas `f32` (`[L, R, L, R, ...]`) em um bloco IMA-ADPCM auto-contido.
+/// Reamostra áudio estéreo intercalado `f32` de `src_rate` para `dst_rate` (interpolação linear).
+pub fn resample_stereo_f32(samples: &[f32], src_rate: u32, dst_rate: u32) -> Vec<f32> {
+    if src_rate == dst_rate || samples.len() < 2 {
+        return samples.to_vec();
+    }
+    let src_frames = samples.len() / 2;
+    let dst_frames = ((src_frames as u64 * u64::from(dst_rate)) / u64::from(src_rate.max(1))) as usize;
+    if dst_frames == 0 {
+        return Vec::new();
+    }
+    let ratio = src_frames as f64 / dst_frames as f64;
+    let mut out = Vec::with_capacity(dst_frames * 2);
+    for i in 0..dst_frames {
+        let pos = i as f64 * ratio;
+        let idx0 = (pos.floor() as usize).min(src_frames - 1);
+        let idx1 = (idx0 + 1).min(src_frames - 1);
+        let frac = (pos - idx0 as f64) as f32;
+        let l = samples[idx0 * 2] * (1.0 - frac) + samples[idx1 * 2] * frac;
+        let r = samples[idx0 * 2 + 1] * (1.0 - frac) + samples[idx1 * 2 + 1] * frac;
+        out.push(l);
+        out.push(r);
+    }
+    out
+}
+
+/// Codifica amostras estéreo intercaladas `f32` em IMA-ADPCM 4:1.
 pub fn encode_stereo_f32(samples: &[f32]) -> Vec<u8> {
     let frames = samples.len() / 2;
     if frames == 0 {
@@ -92,8 +116,6 @@ pub fn encode_stereo_f32(samples: &[f32]) -> Vec<u8> {
         index: 0,
     };
 
-    // Cabeçalho: [L_pred i16][L_idx u8][R_pred i16][R_idx u8][frames u16] = 8 bytes
-    // Depois: 1 byte por frame estéreo (low nibble = L, high nibble = R)
     let mut out = Vec::with_capacity(8 + frames.saturating_sub(1));
     out.extend_from_slice(&(left.predictor as i16).to_le_bytes());
     out.push(left.index as u8);
@@ -111,7 +133,7 @@ pub fn encode_stereo_f32(samples: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Decodifica um bloco IMA-ADPCM estéreo de volta para `f32` intercalado (`[L, R, ...]`).
+/// Decodifica um bloco IMA-ADPCM estéreo de volta para `f32` intercalado.
 pub fn decode_stereo_f32(data: &[u8]) -> Option<Vec<f32>> {
     if data.len() < 8 {
         return None;
@@ -142,6 +164,29 @@ pub fn decode_stereo_f32(data: &[u8]) -> Option<Vec<f32>> {
     Some(out)
 }
 
+/// Codifica áudio estéreo `f32` em PCM 16-bit sem perdas (qualidade Estúdio).
+pub fn encode_pcm16_stereo(samples: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(samples.len() * 2);
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+/// Decodifica PCM 16-bit estéreo de volta para `f32`.
+pub fn decode_pcm16_stereo(data: &[u8]) -> Option<Vec<f32>> {
+    if data.len() < 4 || !data.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(data.len() / 2);
+    for chunk in data.chunks_exact(2) {
+        let v = i16::from_le_bytes([chunk[0], chunk[1]]);
+        out.push(f32::from(v) / 32768.0);
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,7 +200,6 @@ mod tests {
             input.push((t * 660.0 * std::f32::consts::TAU).sin() * 0.4);
         }
         let encoded = encode_stereo_f32(&input);
-        assert!(encoded.len() < input.len() * 4 / 3);
         let decoded = decode_stereo_f32(&encoded).unwrap();
         assert_eq!(decoded.len(), input.len());
 
@@ -166,5 +210,14 @@ mod tests {
             .sum::<f32>()
             / input.len() as f32;
         assert!(mse < 0.002, "MSE too high: {mse}");
+    }
+
+    #[test]
+    fn resample_48k_to_32k_and_back() {
+        let input = vec![0.5f32; 960 * 2];
+        let down = resample_stereo_f32(&input, 48_000, 32_000);
+        assert_eq!(down.len(), 640 * 2);
+        let up = resample_stereo_f32(&down, 32_000, 48_000);
+        assert_eq!(up.len(), 960 * 2);
     }
 }

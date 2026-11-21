@@ -1,6 +1,5 @@
 mod ui;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use ct_core::settings::SettingsStore;
@@ -22,13 +21,9 @@ fn main() -> eframe::Result<()> {
         .find_map(|a| a.strip_prefix("--profile=").map(ToString::to_string));
 
     let data_dir = SettingsStore::default_data_dir(profile.as_deref());
-    let bin_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("bin")))
-        .unwrap_or_else(|| PathBuf::from("resources/bin"));
 
     let rt = Arc::new(Runtime::new().expect("Falha ao criar runtime Tokio"));
-    let session = RoomSession::new(data_dir, bin_dir);
+    let session = RoomSession::new(data_dir);
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
