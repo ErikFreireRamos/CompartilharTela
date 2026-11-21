@@ -104,9 +104,10 @@ pub fn stable_ipv6() -> Option<String> {
     use windows::Win32::Foundation::ERROR_BUFFER_OVERFLOW;
     use windows::Win32::NetworkManagement::IpHelper::{
         GAA_FLAG_INCLUDE_PREFIX, GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH,
-        IpDadStatePreferred, IpSuffixOriginRandom,
     };
-    use windows::Win32::Networking::WinSock::{AF_INET6, SOCKADDR_IN6};
+    use windows::Win32::Networking::WinSock::{
+        AF_INET6, IpDadStatePreferred, IpSuffixOriginRandom, SOCKADDR_IN6,
+    };
 
     unsafe {
         let mut size = 16 * 1024u32;
