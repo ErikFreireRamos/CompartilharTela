@@ -26,17 +26,20 @@ use tokio_tungstenite::tungstenite::Message as TungMsg;
 
 use crate::host_controller::{HostController, JoinRequest};
 use crate::probe::UdpProbeResponder;
+use crate::room_hub::ClassicRoomHub;
 
 #[derive(Clone)]
 struct ServerState {
     identity: String,
     host: Arc<RwLock<Option<Arc<HostController>>>>,
+    hub: Arc<RwLock<Option<Arc<ClassicRoomHub>>>>,
     http: Client,
 }
 
 pub struct PublicServer {
     identity: String,
     host: Arc<RwLock<Option<Arc<HostController>>>>,
+    hub: Arc<RwLock<Option<Arc<ClassicRoomHub>>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     server_task: Option<JoinHandle<()>>,
     udp_probe: Option<UdpProbeResponder>,
@@ -47,6 +50,7 @@ impl PublicServer {
         Self {
             identity: identity.into(),
             host: Arc::new(RwLock::new(None)),
+            hub: Arc::new(RwLock::new(None)),
             shutdown_tx: None,
             server_task: None,
             udp_probe: None,
@@ -55,6 +59,10 @@ impl PublicServer {
 
     pub async fn set_host(&self, host: Option<Arc<HostController>>) {
         *self.host.write().await = host;
+    }
+
+    pub async fn set_hub(&self, hub: Option<Arc<ClassicRoomHub>>) {
+        *self.hub.write().await = hub;
     }
 
     pub async fn listen(&mut self) -> bool {
@@ -69,12 +77,14 @@ impl PublicServer {
         let state = ServerState {
             identity: self.identity.clone(),
             host: self.host.clone(),
+            hub: self.hub.clone(),
             http: Client::new(),
         };
 
         let app = Router::new()
             .route("/probe", get(handle_probe))
             .route("/api/join", post(handle_join))
+            .route("/ws/room", get(handle_room_ws))
             .fallback(any(handle_proxy))
             .with_state(state);
 
@@ -143,6 +153,14 @@ async fn handle_join(
     let reply = host.handle_join(req, &remote_ip).await;
     let status = StatusCode::from_u16(reply.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, Json(reply.body)).into_response()
+}
+
+async fn handle_room_ws(State(state): State<ServerState>, ws: WebSocketUpgrade) -> Response {
+    let hub = state.hub.read().await.clone();
+    let Some(hub) = hub else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "not-host" }))).into_response();
+    };
+    ws.on_upgrade(move |socket| hub.handle_socket(socket))
 }
 
 async fn handle_proxy(State(state): State<ServerState>, req: Request) -> Response {

@@ -32,7 +32,7 @@ fn main() -> eframe::Result<()> {
             .with_title("CompartilhadorDeTela")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([960.0, 600.0]),
-        vsync: false,
+        vsync: true,
         ..Default::default()
     };
 
@@ -41,10 +41,12 @@ fn main() -> eframe::Result<()> {
         use eframe::egui_wgpu::WgpuSetup;
         use eframe::wgpu;
 
-        options.wgpu_options.present_mode = wgpu::PresentMode::AutoNoVsync;
+        options.wgpu_options.present_mode = wgpu::PresentMode::AutoVsync;
         if let WgpuSetup::CreateNew(ref mut setup) = options.wgpu_options.wgpu_setup {
-            setup.instance_descriptor.backends = wgpu::Backends::DX12 | wgpu::Backends::VULKAN;
-            setup.power_preference = wgpu::PowerPreference::HighPerformance;
+            // DX12 exclusivo no Windows evita o bug do Vulkan (present mode 1000361000)
+            // ao mover a janela entre monitores.
+            setup.instance_descriptor.backends = wgpu::Backends::DX12;
+            setup.power_preference = wgpu::PowerPreference::LowPower;
         }
     }
 

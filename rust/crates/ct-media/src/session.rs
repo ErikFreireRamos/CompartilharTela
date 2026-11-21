@@ -1,14 +1,15 @@
-//! Máquina de estados da sala (`RoomSession`), coordenando `ct-core`, `ct-net`,
-//! `ct-host`, captura de tela e áudio por app, e publicando snapshots imutáveis para a UI.
+//! Máquina de estados da sala (`RoomSession`), suportando:
+//!  - **P2P (Iroh)**: QUIC direto + relay automático, sem abrir portas nem `livekit-server.exe`.
+//!  - **Clássico (LiveKit)**: compatível com o app Electron antigo + hub WebSocket `/ws/room`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ct_core::election::successor_candidates;
 use ct_core::protocol::{
-    ContentType, PUBLIC_PORT, QualityId, QualityPreset, RoomMeta, RoomScope, preset_by_id,
+    ContentType, PUBLIC_PORT, QualityId, QualityPreset, RoomMeta, RoomMode, RoomScope,
+    encode_video_packet, preset_by_id,
 };
 use ct_core::room_code::{
     RoomAddress, decode_room_code, encode_room_code, generate_room_secret,
@@ -17,16 +18,21 @@ use ct_core::settings::{Settings, SettingsStore};
 use ct_host::host_controller::{HostController, HostStartOptions};
 use ct_host::livekit_process::LiveKitPaths;
 use ct_host::public_server::PublicServer;
+use ct_host::room_hub::ClassicRoomHub;
 use ct_net::ip::{is_elevated, url_host};
 use ct_net::lan_discovery::{LanResponder, find_on_lan};
 use ct_net::network::NetworkManager;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, watch};
+use tokio::task::JoinHandle;
 
 use crate::audio::{AudioApp, AudioCaptureEngine, AudioMode};
-use crate::screen::{CapturedVideoFrame, ScreenCapturer, ScreenSource, list_screen_sources};
+use crate::p2p::{IrohRoomHost, IrohRoomTicket, RoomTransport, TransportEvent, is_iroh_ticket};
+use crate::screen::{
+    CapturedVideoFrame, ScreenCapturer, ScreenSource, encode_frame_jpeg, list_screen_sources,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -45,6 +51,7 @@ pub enum ReceiveQuality {
 
 #[derive(Debug, Clone)]
 pub struct JoinInfo {
+    pub mode: RoomMode,
     pub url: String,
     pub token: String,
     pub identity: String,
@@ -140,7 +147,10 @@ pub struct RoomSession {
     network: Mutex<NetworkManager>,
     public_server: Mutex<PublicServer>,
     host: Mutex<Option<Arc<HostController>>>,
+    classic_hub: Mutex<Option<Arc<ClassicRoomHub>>>,
     lan_responder: Mutex<Option<LanResponder>>,
+    transport: Mutex<Option<Arc<RoomTransport>>>,
+    event_pump: Mutex<Option<JoinHandle<()>>>,
     audio: Mutex<AudioCaptureEngine>,
     capturer: Mutex<Option<ScreenCapturer>>,
     receive_modes: Mutex<HashMap<String, ReceiveQuality>>,
@@ -178,7 +188,10 @@ impl RoomSession {
             network: Mutex::new(NetworkManager::new()),
             public_server: Mutex::new(PublicServer::new(client_id)),
             host: Mutex::new(None),
+            classic_hub: Mutex::new(None),
             lan_responder: Mutex::new(None),
+            transport: Mutex::new(None),
+            event_pump: Mutex::new(None),
             audio: Mutex::new(AudioCaptureEngine::new()),
             capturer: Mutex::new(None),
             receive_modes: Mutex::new(HashMap::new()),
@@ -267,51 +280,179 @@ impl RoomSession {
     }
 
     pub async fn set_max_quality(&self, quality: Option<QualityId>) {
+        if let Some(transport) = self.transport.lock().await.clone() {
+            transport.set_max_quality(quality).await;
+        }
         if let Some(host) = self.host.lock().await.clone() {
             host.set_max_quality(quality).await;
             let meta = host.room_meta().await;
+            if let Some(hub) = self.classic_hub.lock().await.clone() {
+                hub.update_meta(meta.clone()).await;
+            }
             self.snapshot_tx.send_modify(|s| s.meta = Some(meta));
             self.request_repaint();
         }
     }
 
-    pub async fn create_room(&self, nickname: String) {
+    pub async fn create_room(self: &Arc<Self>, nickname: String, mode: RoomMode) {
         self.snapshot_tx.send_modify(|s| {
             s.phase = Phase::Connecting;
             s.error = None;
         });
         self.request_repaint();
+
         let secret = generate_room_secret();
-        match self.become_host(secret, 1, nickname.clone()).await {
-            Ok((info, meta)) => {
-                let local_peer = PeerView {
-                    identity: info.identity.clone(),
-                    name: nickname,
-                    is_local: true,
-                    is_host: true,
-                    can_host: Some(true),
-                    sharing: false,
-                };
-                self.snapshot_tx.send_modify(|s| {
-                    s.phase = Phase::Connected;
-                    s.info = Some(info);
-                    s.meta = Some(meta);
-                    s.peers = vec![local_peer];
-                });
-                self.request_repaint();
+        match mode {
+            RoomMode::Iroh => {
+                let (ev_tx, ev_rx) = mpsc::channel(64);
+                let client_id = self.settings.lock().await.get().client_id.clone();
+                match IrohRoomHost::start(secret, client_id.clone(), nickname.clone(), ev_tx).await
+                {
+                    Ok(iroh_host) => {
+                        let ticket = iroh_host.ticket.clone();
+                        let meta = iroh_host.meta.clone();
+                        let info = JoinInfo {
+                            mode: RoomMode::Iroh,
+                            url: "iroh://p2p".to_string(),
+                            token: String::new(),
+                            identity: client_id.clone(),
+                            endpoint: "iroh".to_string(),
+                            code: ticket,
+                            secret,
+                            is_host: true,
+                            ports_open: Some(true),
+                            cgnat: Some(false),
+                            scope: Some(RoomScope::Internet),
+                        };
+                        let local_peer = PeerView {
+                            identity: client_id,
+                            name: nickname,
+                            is_local: true,
+                            is_host: true,
+                            can_host: Some(true),
+                            sharing: false,
+                        };
+                        *self.transport.lock().await =
+                            Some(Arc::new(RoomTransport::IrohHost(iroh_host)));
+                        self.spawn_event_pump(ev_rx).await;
+
+                        self.snapshot_tx.send_modify(|s| {
+                            s.phase = Phase::Connected;
+                            s.info = Some(info);
+                            s.meta = Some(meta);
+                            s.peers = vec![local_peer];
+                        });
+                        self.request_repaint();
+                    }
+                    Err(err) => {
+                        self.reset_with_error(Some(err)).await;
+                    }
+                }
             }
-            Err(err) => {
-                self.reset_with_error(Some(err)).await;
-            }
+            RoomMode::Classic => match self.become_classic_host(secret, 1, nickname.clone()).await {
+                Ok((info, meta)) => {
+                    let (ev_tx, ev_rx) = mpsc::channel(64);
+                    let ws_url = format!("ws://127.0.0.1:{PUBLIC_PORT}/ws/room");
+                    if let Ok(tr) = RoomTransport::connect_classic_ws(
+                        &ws_url,
+                        info.identity.clone(),
+                        nickname.clone(),
+                        secret,
+                        ev_tx,
+                    )
+                    .await
+                    {
+                        *self.transport.lock().await = Some(Arc::new(tr));
+                        self.spawn_event_pump(ev_rx).await;
+                    }
+                    let local_peer = PeerView {
+                        identity: info.identity.clone(),
+                        name: nickname,
+                        is_local: true,
+                        is_host: true,
+                        can_host: Some(true),
+                        sharing: false,
+                    };
+                    self.snapshot_tx.send_modify(|s| {
+                        s.phase = Phase::Connected;
+                        s.info = Some(info);
+                        s.meta = Some(meta);
+                        s.peers = vec![local_peer];
+                    });
+                    self.request_repaint();
+                }
+                Err(err) => {
+                    self.reset_with_error(Some(err)).await;
+                }
+            },
         }
     }
 
-    pub async fn join_room(&self, code: String, nickname: String) {
+    pub async fn join_room(self: &Arc<Self>, code: String, nickname: String) {
         self.snapshot_tx.send_modify(|s| {
             s.phase = Phase::Connecting;
             s.error = None;
         });
         self.request_repaint();
+
+        if is_iroh_ticket(&code) {
+            let ticket = match IrohRoomTicket::decode(&code) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.reset_with_error(Some(e)).await;
+                    return;
+                }
+            };
+            let client_id = self.settings.lock().await.get().client_id.clone();
+            let secret = ticket.secret;
+            let (ev_tx, ev_rx) = mpsc::channel(64);
+            match RoomTransport::connect_iroh_client(
+                ticket,
+                client_id.clone(),
+                nickname.clone(),
+                ev_tx,
+            )
+            .await
+            {
+                Ok(tr) => {
+                    *self.transport.lock().await = Some(Arc::new(tr));
+                    self.spawn_event_pump(ev_rx).await;
+                    let info = JoinInfo {
+                        mode: RoomMode::Iroh,
+                        url: "iroh://p2p".to_string(),
+                        token: String::new(),
+                        identity: client_id.clone(),
+                        endpoint: "iroh".to_string(),
+                        code: code.trim().to_string(),
+                        secret,
+                        is_host: false,
+                        ports_open: None,
+                        cgnat: None,
+                        scope: Some(RoomScope::Internet),
+                    };
+                    let local_peer = PeerView {
+                        identity: client_id,
+                        name: nickname,
+                        is_local: true,
+                        is_host: false,
+                        can_host: Some(false),
+                        sharing: false,
+                    };
+                    self.snapshot_tx.send_modify(|s| {
+                        s.phase = Phase::Connected;
+                        s.info = Some(info);
+                        s.peers = vec![local_peer];
+                    });
+                    self.request_repaint();
+                }
+                Err(err) => {
+                    self.reset_with_error(Some(err)).await;
+                }
+            }
+            return;
+        }
+
+        // Modo Clássico (código IPv4/IPv6 de 12 ou 32 caracteres)
         let addr = match decode_room_code(&code) {
             Ok(a) => a,
             Err(e) => {
@@ -319,8 +460,26 @@ impl RoomSession {
                 return;
             }
         };
-        match self.join_target(&addr.ip, addr.secret, &nickname).await {
-            Ok(info) => {
+        match self
+            .join_classic_target(&addr.ip, addr.secret, &nickname)
+            .await
+        {
+            Ok((info, target_ip)) => {
+                let (ev_tx, ev_rx) = mpsc::channel(64);
+                let ws_url = format!("ws://{}:{PUBLIC_PORT}/ws/room", url_host(&target_ip));
+                if let Ok(tr) = RoomTransport::connect_classic_ws(
+                    &ws_url,
+                    info.identity.clone(),
+                    nickname.clone(),
+                    addr.secret,
+                    ev_tx,
+                )
+                .await
+                {
+                    *self.transport.lock().await = Some(Arc::new(tr));
+                    self.spawn_event_pump(ev_rx).await;
+                }
+
                 let local_peer = PeerView {
                     identity: info.identity.clone(),
                     name: nickname,
@@ -342,21 +501,102 @@ impl RoomSession {
         }
     }
 
+    async fn spawn_event_pump(self: &Arc<Self>, mut ev_rx: mpsc::Receiver<TransportEvent>) {
+        if let Some(old) = self.event_pump.lock().await.take() {
+            old.abort();
+        }
+        let weak = Arc::downgrade(self);
+        let handle = tokio::spawn(async move {
+            while let Some(ev) = ev_rx.recv().await {
+                let Some(session) = weak.upgrade() else {
+                    break;
+                };
+                match ev {
+                    TransportEvent::RoomState { meta, peers } => {
+                        let my_id = session.settings.lock().await.get().client_id.clone();
+                        let recv_map = session.receive_modes.lock().await.clone();
+                        let peer_views: Vec<PeerView> = peers
+                            .iter()
+                            .map(|p| PeerView {
+                                identity: p.identity.clone(),
+                                name: p.name.clone(),
+                                is_local: p.identity == my_id,
+                                is_host: p.is_host,
+                                can_host: p.can_host,
+                                sharing: p.sharing,
+                            })
+                            .collect();
+                        let stream_views: Vec<StreamView> = peers
+                            .iter()
+                            .filter(|p| p.sharing)
+                            .map(|p| StreamView {
+                                identity: p.identity.clone(),
+                                name: p.name.clone(),
+                                is_local: p.identity == my_id,
+                                has_audio: p.has_audio,
+                                receive: recv_map
+                                    .get(&p.identity)
+                                    .copied()
+                                    .unwrap_or(ReceiveQuality::Auto),
+                            })
+                            .collect();
+
+                        session.snapshot_tx.send_modify(|s| {
+                            s.meta = Some(meta);
+                            s.peers = peer_views;
+                            s.streams = stream_views;
+                        });
+                        session.request_repaint();
+                    }
+                    TransportEvent::VideoFrame { identity, frame } => {
+                        let is_off = session
+                            .receive_modes
+                            .lock()
+                            .await
+                            .get(&identity)
+                            .copied()
+                            == Some(ReceiveQuality::Off);
+                        if !is_off {
+                            if let Ok(mut map) = session.frames.write() {
+                                map.insert(identity, frame);
+                            }
+                            session.request_repaint();
+                        }
+                    }
+                    TransportEvent::RoomEnd { reason } => {
+                        session.reset_with_error(Some(reason)).await;
+                        break;
+                    }
+                    TransportEvent::Disconnected => {
+                        if session.snapshot().phase != Phase::Idle {
+                            session
+                                .reset_with_error(Some(
+                                    "Conexão com o host perdida (o host saiu da sala).".to_string(),
+                                ))
+                                .await;
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+        *self.event_pump.lock().await = Some(handle);
+    }
+
     pub async fn leave_room(&self) {
         let is_host = self.snapshot().is_host();
         self.snapshot_tx.send_modify(|s| {
             s.notice = Some(if is_host {
-                "Passando o host para outra pessoa…".to_string()
+                "Encerrando sala…".to_string()
             } else {
                 "Saindo…".to_string()
             });
         });
+        self.request_repaint();
 
-        // Verifica candidatos de sucessão disponíveis antes de encerrar
-        let snap = self.snapshot();
-        let present: Vec<&str> = snap.peers.iter().map(|p| p.identity.as_str()).collect();
-        let _candidates = successor_candidates(snap.meta.as_ref(), present, &[]);
-
+        if let Some(hub) = self.classic_hub.lock().await.clone() {
+            hub.close_room("O host encerrou a sala.").await;
+        }
         self.reset_with_error(None).await;
     }
 
@@ -388,6 +628,11 @@ impl RoomSession {
 
         let local_id = self.settings.lock().await.get().client_id.clone();
         let local_name = self.settings.lock().await.get().nickname.clone();
+        let has_audio = audio_mode != AudioMode::None;
+
+        if let Some(tr) = self.transport.lock().await.clone() {
+            tr.send_share_state(true, has_audio).await;
+        }
 
         self.snapshot_tx.send_modify(|s| {
             s.share = Some(ActiveShare {
@@ -399,18 +644,19 @@ impl RoomSession {
             if let Some(p) = s.peers.iter_mut().find(|p| p.is_local) {
                 p.sharing = true;
             }
-            s.streams.retain(|st| !st.is_local);
-            s.streams.push(StreamView {
-                identity: local_id.clone(),
-                name: if local_name.is_empty() {
-                    "Você".to_string()
-                } else {
-                    local_name
-                },
-                is_local: true,
-                has_audio: audio_mode != AudioMode::None,
-                receive: ReceiveQuality::Auto,
-            });
+            if !s.streams.iter().any(|st| st.is_local) {
+                s.streams.push(StreamView {
+                    identity: local_id.clone(),
+                    name: if local_name.is_empty() {
+                        "Você".to_string()
+                    } else {
+                        local_name
+                    },
+                    is_local: true,
+                    has_audio,
+                    receive: ReceiveQuality::Auto,
+                });
+            }
         });
         self.request_repaint();
 
@@ -420,11 +666,32 @@ impl RoomSession {
                 let Some(session) = session_weak.upgrade() else {
                     break;
                 };
-                if let Some(frame) = frame_rx.borrow().clone() {
+                let frame = frame_rx.borrow().clone();
+                if let Some(frame) = frame {
                     if let Ok(mut map) = session.frames.write() {
-                        map.insert(local_id.clone(), frame);
+                        map.insert(local_id.clone(), frame.clone());
                     }
                     session.request_repaint();
+
+                    if let Some(tr) = session.transport.lock().await.clone() {
+                        let id_clone = local_id.clone();
+                        let encoded = tokio::task::spawn_blocking(move || {
+                            let jpeg = encode_frame_jpeg(&frame, 75)?;
+                            Some(encode_video_packet(
+                                &id_clone,
+                                frame.width,
+                                frame.height,
+                                frame.seq,
+                                &jpeg,
+                            ))
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(pkt) = encoded {
+                            tr.send_video_packet(pkt).await;
+                        }
+                    }
                 }
             }
         });
@@ -437,6 +704,9 @@ impl RoomSession {
             cap.stop();
         }
         self.audio.lock().await.stop();
+        if let Some(tr) = self.transport.lock().await.clone() {
+            tr.send_share_state(false, false).await;
+        }
         let local_id = self.settings.lock().await.get().client_id.clone();
         if let Ok(mut map) = self.frames.write() {
             map.remove(&local_id);
@@ -451,7 +721,7 @@ impl RoomSession {
         self.request_repaint();
     }
 
-    async fn become_host(
+    async fn become_classic_host(
         &self,
         secret: u32,
         epoch: u64,
@@ -519,11 +789,20 @@ impl RoomSession {
             .mint_token(&client_id, &nickname)
             .map_err(|e| e.to_string())?;
 
+        let hub = ClassicRoomHub::new(secret, meta.clone());
+        hub.register_host_peer(client_id.clone(), nickname).await;
+
         *self.host.lock().await = Some(ctl.clone());
-        self.public_server.lock().await.set_host(Some(ctl)).await;
+        *self.classic_hub.lock().await = Some(hub.clone());
+        {
+            let srv = self.public_server.lock().await;
+            srv.set_host(Some(ctl)).await;
+            srv.set_hub(Some(hub)).await;
+        }
         *self.lan_responder.lock().await = LanResponder::start(secret).await;
 
         let info = JoinInfo {
+            mode: RoomMode::Classic,
             url: format!("ws://127.0.0.1:{PUBLIC_PORT}"),
             token,
             identity: client_id,
@@ -538,7 +817,12 @@ impl RoomSession {
         Ok((info, meta))
     }
 
-    async fn join_target(&self, ip: &str, secret: u32, nickname: &str) -> Result<JoinInfo, String> {
+    async fn join_classic_target(
+        &self,
+        ip: &str,
+        secret: u32,
+        nickname: &str,
+    ) -> Result<(JoinInfo, String), String> {
         let target = find_on_lan(secret, Duration::from_millis(500))
             .await
             .unwrap_or_else(|| ip.to_string());
@@ -590,36 +874,56 @@ impl RoomSession {
         })
         .unwrap_or_default();
 
-        Ok(JoinInfo {
-            url: format!("ws://{}:{PUBLIC_PORT}", url_host(&target)),
-            token,
-            identity: client_id,
-            endpoint: ip.to_string(),
-            code: body.code.unwrap_or(fallback_code),
-            secret,
-            is_host: false,
-            ports_open: None,
-            cgnat: None,
-            scope: None,
-        })
+        Ok((
+            JoinInfo {
+                mode: RoomMode::Classic,
+                url: format!("ws://{}:{PUBLIC_PORT}", url_host(&target)),
+                token,
+                identity: client_id,
+                endpoint: ip.to_string(),
+                code: body.code.unwrap_or(fallback_code),
+                secret,
+                is_host: false,
+                ports_open: None,
+                cgnat: None,
+                scope: None,
+            },
+            target,
+        ))
     }
 
     async fn stop_hosting(&self) {
         if let Some(resp) = self.lan_responder.lock().await.take() {
             resp.close();
         }
-        self.public_server.lock().await.set_host(None).await;
+        {
+            let srv = self.public_server.lock().await;
+            srv.set_host(None).await;
+            srv.set_hub(None).await;
+        }
+        *self.classic_hub.lock().await = None;
         if let Some(host) = self.host.lock().await.take() {
             host.stop().await;
         }
     }
 
     async fn reset_with_error(&self, error: Option<String>) {
+        if let Some(pump) = self.event_pump.lock().await.take() {
+            pump.abort();
+        }
         self.stop_share().await;
+        if let Some(tr) = self.transport.lock().await.take()
+            && let Ok(owned) = Arc::try_unwrap(tr)
+        {
+            owned.close("O host encerrou a sala.").await;
+        }
         self.stop_hosting().await;
         self.public_server.lock().await.close();
         self.network.lock().await.close_ports().await;
         self.receive_modes.lock().await.clear();
+        if let Ok(mut map) = self.frames.write() {
+            map.clear();
+        }
 
         self.snapshot_tx.send_modify(|s| {
             s.phase = Phase::Idle;
@@ -630,5 +934,6 @@ impl RoomSession {
             s.peers.clear();
             s.streams.clear();
         });
+        self.request_repaint();
     }
 }

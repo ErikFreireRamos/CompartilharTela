@@ -194,3 +194,90 @@ pub fn parse_room_meta(raw: Option<&str>) -> Option<RoomMeta> {
     let meta: RoomMeta = serde_json::from_str(raw).ok()?;
     (meta.v == 1).then_some(meta)
 }
+
+/// Modo de criação da sala escolhido pelo usuário.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoomMode {
+    /// P2P via Iroh (QUIC com NAT traversal + relay automático; sem abrir portas).
+    Iroh,
+    /// Clássico via LiveKit (compatível com o app Electron antigo).
+    Classic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WirePeer {
+    pub identity: String,
+    pub name: String,
+    pub is_host: bool,
+    pub can_host: Option<bool>,
+    pub sharing: bool,
+    pub has_audio: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "kebab-case")]
+pub enum RoomWireMessage {
+    Hello {
+        identity: String,
+        name: String,
+        secret: u32,
+    },
+    RoomState {
+        meta: RoomMeta,
+        peers: Vec<WirePeer>,
+    },
+    ShareState {
+        sharing: bool,
+        has_audio: bool,
+    },
+    RoomEnd {
+        reason: String,
+    },
+}
+
+pub const WIRE_FRAME_VIDEO: u8 = 1;
+
+/// Empacota um frame JPEG para envio binário (Iroh QUIC / WebSocket).
+pub fn encode_video_packet(identity: &str, width: u32, height: u32, seq: u64, jpeg: &[u8]) -> Vec<u8> {
+    let id_bytes = identity.as_bytes();
+    let id_len = (id_bytes.len().min(u16::MAX as usize)) as u16;
+    let mut out = Vec::with_capacity(1 + 2 + id_len as usize + 4 + 4 + 8 + jpeg.len());
+    out.push(WIRE_FRAME_VIDEO);
+    out.extend_from_slice(&id_len.to_le_bytes());
+    out.extend_from_slice(&id_bytes[..id_len as usize]);
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(jpeg);
+    out
+}
+
+/// Desempacota um frame JPEG recebido pela rede.
+pub fn decode_video_packet(data: &[u8]) -> Option<(String, u32, u32, u64, &[u8])> {
+    if data.len() < 19 || data[0] != WIRE_FRAME_VIDEO {
+        return None;
+    }
+    let id_len = u16::from_le_bytes([data[1], data[2]]) as usize;
+    let header_end = 3 + id_len + 16;
+    if data.len() < header_end {
+        return None;
+    }
+    let identity = std::str::from_utf8(&data[3..3 + id_len]).ok()?.to_string();
+    let off = 3 + id_len;
+    let width = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+    let height = u32::from_le_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]]);
+    let seq = u64::from_le_bytes([
+        data[off + 8],
+        data[off + 9],
+        data[off + 10],
+        data[off + 11],
+        data[off + 12],
+        data[off + 13],
+        data[off + 14],
+        data[off + 15],
+    ]);
+    Some((identity, width, height, seq, &data[header_end..]))
+}
+

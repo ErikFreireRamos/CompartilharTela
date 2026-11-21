@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use ct_core::protocol::RoomMode;
 use ct_media::audio::AudioApp;
 use ct_media::screen::ScreenSource;
 use ct_media::session::{Phase, RoomSession, SessionSnapshot};
@@ -30,6 +31,7 @@ pub struct CompartilharApp {
     // Home UI state
     pub nickname_input: String,
     pub code_input: String,
+    pub create_mode: RoomMode,
 
     // Room UI state
     pub focused_id: Option<String>,
@@ -60,6 +62,7 @@ impl CompartilharApp {
             snap,
             nickname_input,
             code_input: String::new(),
+            create_mode: RoomMode::Iroh,
             focused_id: None,
             grid_mode: false,
             copied_until: None,

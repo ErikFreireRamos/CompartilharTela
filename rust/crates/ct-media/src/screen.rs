@@ -344,9 +344,14 @@ fn capture_loop_dxgi(
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut resource = None;
 
-            match duplication.AcquireNextFrame(50, &mut frame_info, &mut resource) {
+            match duplication.AcquireNextFrame(100, &mut frame_info, &mut resource) {
                 Ok(()) => {
-                    if let Some(res) = resource
+                    // Pula cópia GPU->CPU quando o compositor não apresentou frame novo
+                    let has_new_image = seq == 0
+                        || frame_info.LastPresentTime != 0
+                        || frame_info.AccumulatedFrames > 0;
+                    if has_new_image
+                        && let Some(res) = resource
                         && let Ok(tex) = res.cast::<ID3D11Texture2D>()
                     {
                         let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -563,3 +568,35 @@ fn capture_loop_fallback(
         thread::sleep(frame_interval);
     }
 }
+
+/// Codifica um frame RGBA8 para JPEG rápido para envio P2P / WebSocket.
+pub fn encode_frame_jpeg(frame: &CapturedVideoFrame, quality: u8) -> Option<Vec<u8>> {
+    if frame.width == 0 || frame.height == 0 || frame.width > u16::MAX as u32 || frame.height > u16::MAX as u32 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(64 * 1024);
+    let encoder = jpeg_encoder::Encoder::new(&mut out, quality);
+    encoder
+        .encode(
+            &frame.rgba,
+            frame.width as u16,
+            frame.height as u16,
+            jpeg_encoder::ColorType::Rgba,
+        )
+        .ok()?;
+    Some(out)
+}
+
+/// Decodifica um frame JPEG recebido pela rede para RGBA8 pronto para upload na GPU.
+pub fn decode_frame_jpeg(jpeg: &[u8], seq: u64) -> Option<CapturedVideoFrame> {
+    let img = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    Some(CapturedVideoFrame {
+        width,
+        height,
+        rgba: Arc::new(rgba.into_raw()),
+        seq,
+    })
+}
+

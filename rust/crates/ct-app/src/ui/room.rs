@@ -16,13 +16,19 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     // Top bar
     egui::TopBottomPanel::top("room_header").show(ctx, |ui| {
         ui.horizontal(|ui| {
-            let code_label = if copied {
-                format!("Código {} (copiado!)", snap.code())
+            let full_code = snap.code();
+            let display_code = if full_code.len() > 24 {
+                format!("{}…", &full_code[..20])
             } else {
-                format!("Código {} [Copiar]", snap.code())
+                full_code.to_string()
+            };
+            let code_label = if copied {
+                format!("Código {display_code} (copiado!)")
+            } else {
+                format!("Código {display_code} [Copiar]")
             };
             if ui.button(RichText::new(code_label).strong()).clicked() {
-                ctx.copy_text(snap.code().to_string());
+                ctx.copy_text(full_code.to_string());
                 app.copied_until = Some(Instant::now() + Duration::from_millis(1500));
             }
 
