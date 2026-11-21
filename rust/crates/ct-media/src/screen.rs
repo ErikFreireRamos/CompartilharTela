@@ -407,34 +407,37 @@ fn capture_loop_dxgi(
                                 .is_ok()
                             {
                                 let pitch = mapped.RowPitch as usize;
-                                let total_bytes = pitch * (desc.Height as usize);
-                                let slice = std::slice::from_raw_parts(
-                                    mapped.pData as *const u8,
-                                    total_bytes,
-                                );
-                                let (dst_w, dst_h) = fit_dimensions(
-                                    desc.Width,
-                                    desc.Height,
-                                    cfg.max_width,
-                                    cfg.max_height,
-                                );
-                                let rgba = convert_bgra_to_rgba_scaled(
-                                    slice,
-                                    pitch,
-                                    desc.Width,
-                                    desc.Height,
-                                    dst_w,
-                                    dst_h,
-                                );
+                                let row_bytes = (desc.Width as usize) * 4;
+                                if !mapped.pData.is_null() && pitch >= row_bytes && desc.Height > 0
+                                {
+                                    let total_bytes = pitch * (desc.Height as usize);
+                                    let slice = std::slice::from_raw_parts(
+                                        mapped.pData as *const u8,
+                                        total_bytes,
+                                    );
+                                    let (dst_w, dst_h) = fit_dimensions(
+                                        desc.Width,
+                                        desc.Height,
+                                        cfg.max_width,
+                                        cfg.max_height,
+                                    );
+                                    let rgba = convert_bgra_to_rgba_scaled(
+                                        slice,
+                                        pitch,
+                                        desc.Width,
+                                        desc.Height,
+                                        dst_w,
+                                        dst_h,
+                                    );
+                                    seq += 1;
+                                    let _ = tx.send(Some(CapturedVideoFrame {
+                                        width: dst_w,
+                                        height: dst_h,
+                                        rgba: Arc::new(rgba),
+                                        seq,
+                                    }));
+                                }
                                 context.Unmap(st_tex, 0);
-
-                                seq += 1;
-                                let _ = tx.send(Some(CapturedVideoFrame {
-                                    width: dst_w,
-                                    height: dst_h,
-                                    rgba: Arc::new(rgba),
-                                    seq,
-                                }));
                             }
                         }
                     }

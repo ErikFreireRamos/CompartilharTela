@@ -10,6 +10,10 @@ use tokio::runtime::Runtime;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> eframe::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        eprintln!("[PANIC] {info}");
+    }));
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
         .init();

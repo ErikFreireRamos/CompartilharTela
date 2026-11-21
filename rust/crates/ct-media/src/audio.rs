@@ -308,7 +308,7 @@ mod win_audio {
     use std::mem::{ManuallyDrop, size_of};
     use std::time::Instant;
 
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows::Win32::Media::Audio::{
         AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -336,15 +336,14 @@ mod win_audio {
     use windows::Win32::System::Threading::{
         AvRevertMmThreadCharacteristics, AvSetMmThreadCharacteristicsW, CreateEventW, OpenProcess,
         PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
-        SetEvent, WaitForSingleObject,
+        WaitForSingleObject,
     };
     use windows::Win32::System::Variant::VT_BLOB;
     use windows::core::{HRESULT, Interface, PWSTR, Ref, Result as WinResult, implement};
 
     #[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
     struct ActivationHandler {
-        event: HANDLE,
-        state: StdMutex<Option<WinResult<IAudioClient>>>,
+        done: (StdMutex<Option<WinResult<IAudioClient>>>, Condvar),
     }
 
     impl IAgileObject_Impl for ActivationHandler_Impl {}
@@ -365,11 +364,10 @@ mod win_audio {
                 let unk = unknown.ok_or_else(|| windows::core::Error::from(HRESULT(-1)))?;
                 unk.cast::<IAudioClient>()
             })();
-            if let Ok(mut guard) = self.state.lock() {
+            let (lock, cvar) = &self.done;
+            if let Ok(mut guard) = lock.lock() {
                 *guard = Some(res);
-            }
-            unsafe {
-                let _ = SetEvent(self.event);
+                cvar.notify_all();
             }
             Ok(())
         }
@@ -405,7 +403,9 @@ mod win_audio {
                 },
             };
 
-            let prop = PROPVARIANT {
+            // CRÍTICO: ManuallyDrop evita que PROPVARIANT::drop() chame PropVariantClear
+            // e tente dar CoTaskMemFree no ponteiro da stack (&mut params)!
+            let prop = ManuallyDrop::new(PROPVARIANT {
                 Anonymous: PROPVARIANT_0 {
                     Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
                         vt: VT_BLOB,
@@ -421,36 +421,42 @@ mod win_audio {
                         },
                     }),
                 },
-            };
+            });
 
-            let event = CreateEventW(None, true, false, None)?;
             let handler: IActivateAudioInterfaceCompletionHandler = ActivationHandler {
-                event,
-                state: StdMutex::new(None),
+                done: (StdMutex::new(None), Condvar::new()),
             }
             .into();
 
             let _op = ActivateAudioInterfaceAsync(
                 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
                 &IAudioClient::IID,
-                Some(&prop),
+                Some(&*prop),
                 &handler,
             )?;
 
-            let wait = WaitForSingleObject(event, 3000);
-            let _ = CloseHandle(event);
-            if wait != WAIT_OBJECT_0 {
-                return Err(windows::core::Error::from(HRESULT(-1)));
-            }
-            let impl_ref: &ActivationHandler =
-                windows::core::AsImpl::as_impl(&handler);
-            let out = impl_ref
-                .state
+            let impl_ref: &ActivationHandler = windows::core::AsImpl::as_impl(&handler);
+            let (lock, cvar) = &impl_ref.done;
+            let mut guard = lock
                 .lock()
-                .ok()
-                .and_then(|mut g| g.take())
-                .unwrap_or_else(|| Err(windows::core::Error::from(HRESULT(-1))));
-            out
+                .map_err(|_| windows::core::Error::from(HRESULT(-1)))?;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while guard.is_none() {
+                let rem = deadline.saturating_duration_since(Instant::now());
+                if rem.is_zero() {
+                    return Err(windows::core::Error::from(HRESULT(-1)));
+                }
+                let (g, timeout_res) = cvar
+                    .wait_timeout(guard, rem)
+                    .map_err(|_| windows::core::Error::from(HRESULT(-1)))?;
+                guard = g;
+                if timeout_res.timed_out() {
+                    break;
+                }
+            }
+            guard
+                .take()
+                .unwrap_or_else(|| Err(windows::core::Error::from(HRESULT(-1))))
         }
     }
 
