@@ -43,10 +43,11 @@ pub fn list_screen_sources() -> Vec<ScreenSource> {
 
 #[cfg(windows)]
 fn enumerate_windows_monitors() -> Vec<ScreenSource> {
-    use windows::Win32::Foundation::{BOOL, LPARAM, RECT};
+    use windows::Win32::Foundation::{LPARAM, RECT};
     use windows::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
     };
+    use windows::core::BOOL;
 
     unsafe extern "system" fn enum_proc(
         monitor: HMONITOR,

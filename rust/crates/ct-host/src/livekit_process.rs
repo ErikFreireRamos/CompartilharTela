@@ -35,7 +35,24 @@ pub struct LiveKitProcess {
     pub api_secret: String,
     child: Option<Child>,
     #[cfg(windows)]
-    job_handle: Option<windows::Win32::Foundation::HANDLE>,
+    job_handle: Option<JobHandle>,
+}
+
+#[cfg(windows)]
+struct JobHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for JobHandle {}
+#[cfg(windows)]
+unsafe impl Sync for JobHandle {}
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
 }
 
 impl LiveKitProcess {
@@ -136,10 +153,8 @@ impl LiveKitProcess {
             let _ = child.start_kill();
         }
         #[cfg(windows)]
-        if let Some(job) = self.job_handle.take() {
-            unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(job);
-            }
+        {
+            self.job_handle.take();
         }
     }
 
@@ -174,7 +189,7 @@ impl Drop for LiveKitProcess {
 }
 
 #[cfg(windows)]
-fn attach_kill_on_close_job(pid: u32) -> Option<windows::Win32::Foundation::HANDLE> {
+fn attach_kill_on_close_job(pid: u32) -> Option<JobHandle> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -197,6 +212,6 @@ fn attach_kill_on_close_job(pid: u32) -> Option<windows::Win32::Foundation::HAND
             let _ = AssignProcessToJobObject(job, proc);
             let _ = CloseHandle(proc);
         }
-        Some(job)
+        Some(JobHandle(job))
     }
 }
