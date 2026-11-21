@@ -1,36 +1,36 @@
-use ct_core::protocol::{
-    ContentType, allowed_presets, clamp_quality, host_upload_mbps, preset_by_id,
-};
+use ct_core::protocol::{ContentType, FPS_OPTIONS, RESOLUTIONS};
 use ct_media::session::ShareOptions;
-use egui::{Context, Window};
+use egui::{Color32, Context, RichText, Window};
 
-use super::CompartilharApp;
+use super::{ACCENT_PRIMARY, BG_CONTROL, CompartilharApp, TEXT_MUTED, primary_button};
 
 pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
     let mut open = app.show_share_dialog;
-    let max_q = app.snap.meta.as_ref().and_then(|m| m.max_quality);
-    let allowed = allowed_presets(max_q);
-    let mut quality = clamp_quality(app.snap.settings.quality, max_q);
+    let mut res = app.selected_resolution;
+    let mut fps = app.selected_fps;
     let mut content_type = app.snap.settings.content_type;
     let mut share_audio = app.snap.settings.share_audio;
     let mut blocked = app.snap.settings.blocked_apps.clone();
+    let apps_snapshot = app.audio_apps.lock().map(|g| g.clone()).unwrap_or_default();
+
     let mut start_clicked = false;
     let mut cancel_clicked = false;
     let mut settings_dirty = false;
 
-    Window::new("Compartilhar tela")
+    Window::new("Configurar transmissão")
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
-        .min_width(440.0)
+        .min_width(480.0)
         .show(ctx, |ui| {
-            ui.label("Tela");
+            ui.label(RichText::new("Monitor").strong());
             egui::ComboBox::from_id_salt("screen_picker")
+                .width(ui.available_width())
                 .selected_text(
                     app.screen_sources
                         .get(app.selected_source_idx)
                         .map(|s| s.name.as_str())
-                        .unwrap_or("Nenhuma tela"),
+                        .unwrap_or("Nenhuma tela detectada"),
                 )
                 .show_ui(ui, |ui| {
                     for (idx, src) in app.screen_sources.iter().enumerate() {
@@ -38,68 +38,119 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
                     }
                 });
 
-            ui.add_space(10.0);
-            ui.label("Qualidade");
-            egui::ComboBox::from_id_salt("quality_picker")
-                .selected_text(preset_by_id(quality).label)
-                .show_ui(ui, |ui| {
-                    for p in allowed {
-                        if ui.selectable_value(&mut quality, p.id, p.label).changed() {
-                            settings_dirty = true;
-                        }
+            ui.add_space(12.0);
+            ui.label(RichText::new("Resolução").strong());
+            ui.horizontal(|ui| {
+                for &opt in RESOLUTIONS {
+                    let selected = res == opt;
+                    let btn = egui::Button::new(
+                        RichText::new(opt.label())
+                            .color(if selected { Color32::WHITE } else { TEXT_MUTED })
+                            .strong(),
+                    )
+                    .fill(if selected { ACCENT_PRIMARY } else { BG_CONTROL });
+                    if ui.add(btn).clicked() {
+                        res = opt;
+                        app.selected_resolution = opt;
+                        settings_dirty = true;
                     }
-                });
-
-            let est_mbps = host_upload_mbps(preset_by_id(quality), app.snap.streams.len() + 1);
-            ui.small(format!("Upload estimado do host (sala cheia): ~{est_mbps} Mbps"));
+                }
+            });
 
             ui.add_space(10.0);
-            ui.label("Tipo de conteúdo");
+            ui.label(RichText::new("Taxa de quadros (FPS)").strong());
+            ui.horizontal(|ui| {
+                for &opt in FPS_OPTIONS {
+                    let selected = fps == opt;
+                    let btn = egui::Button::new(
+                        RichText::new(format!("{opt} fps"))
+                            .color(if selected { Color32::WHITE } else { TEXT_MUTED })
+                            .strong(),
+                    )
+                    .fill(if selected { ACCENT_PRIMARY } else { BG_CONTROL });
+                    if ui.add(btn).clicked() {
+                        fps = opt;
+                        app.selected_fps = opt;
+                        settings_dirty = true;
+                    }
+                }
+            });
+            ui.label(
+                RichText::new("Você poderá alterar resolução, FPS e apps bloqueados a qualquer momento durante a transmissão.")
+                    .size(12.0)
+                    .color(TEXT_MUTED),
+            );
+
+            ui.add_space(12.0);
+            ui.label(RichText::new("Otimização de imagem").strong());
             ui.horizontal(|ui| {
                 if ui
-                    .radio_value(&mut content_type, ContentType::Motion, "Jogo / vídeo (H.264 HW)")
+                    .radio_value(&mut content_type, ContentType::Motion, "Jogo / vídeo (mais fluidez)")
                     .changed()
                 {
                     settings_dirty = true;
                 }
                 if ui
-                    .radio_value(&mut content_type, ContentType::Detail, "Texto / código (VP9)")
+                    .radio_value(&mut content_type, ContentType::Detail, "Texto / código (mais nitidez)")
                     .changed()
                 {
                     settings_dirty = true;
                 }
             });
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
             if ui
-                .checkbox(&mut share_audio, "Transmitir áudio do PC (com bloqueio por app)")
+                .checkbox(&mut share_audio, "Transmitir áudio do PC (com bloqueio por aplicativo)")
                 .changed()
             {
                 settings_dirty = true;
             }
 
-            if share_audio && !app.audio_apps.is_empty() {
+            if share_audio {
                 ui.add_space(6.0);
-                ui.label("Apps bloqueados (não enviados):");
-                for app_entry in &app.audio_apps {
-                    let mut is_blocked = blocked.iter().any(|b| b == &app_entry.exe);
-                    if ui
-                        .checkbox(&mut is_blocked, format!("{} ({})", app_entry.name, app_entry.exe))
-                        .changed()
-                    {
-                        if is_blocked {
-                            blocked.push(app_entry.exe.clone());
-                        } else {
-                            blocked.retain(|b| b != &app_entry.exe);
-                        }
-                        settings_dirty = true;
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Apps bloqueados:").strong());
+                    if ui.small_button("Atualizar lista").clicked() {
+                        app.refresh_audio_apps_async(ctx);
                     }
+                });
+                if apps_snapshot.is_empty() {
+                    ui.label(
+                        RichText::new("Discord/Vesktop já ficam bloqueados por padrão. Apps tocando som aparecerão aqui.")
+                            .size(12.0)
+                            .color(TEXT_MUTED),
+                    );
+                } else {
+                    egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                        for app_entry in &apps_snapshot {
+                            let mut is_blocked = blocked.iter().any(|b| b == &app_entry.exe);
+                            if ui
+                                .checkbox(
+                                    &mut is_blocked,
+                                    format!("{} ({})", app_entry.name, app_entry.exe),
+                                )
+                                .changed()
+                            {
+                                if is_blocked {
+                                    if !blocked.iter().any(|b| b == &app_entry.exe) {
+                                        blocked.push(app_entry.exe.clone());
+                                    }
+                                } else {
+                                    blocked.retain(|b| b != &app_entry.exe);
+                                }
+                                settings_dirty = true;
+                            }
+                        }
+                    });
                 }
             }
 
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if ui.button("Iniciar transmissão").clicked() {
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add(primary_button("Iniciar transmissão").min_size(egui::vec2(160.0, 34.0)))
+                    .clicked()
+                {
                     start_clicked = true;
                 }
                 if ui.button("Cancelar").clicked() {
@@ -115,10 +166,11 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
     if settings_dirty {
         let session = app.session.clone();
         let blocked_clone = blocked.clone();
+        let qid = res.to_quality_id(fps);
         app.rt.spawn(async move {
             session
                 .update_settings(|s| {
-                    s.quality = quality;
+                    s.quality = qid;
                     s.content_type = content_type;
                     s.share_audio = share_audio;
                     s.blocked_apps = blocked_clone;
@@ -135,7 +187,8 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
             .unwrap_or_else(|| "screen:0".to_string());
         let opts = ShareOptions {
             source_id,
-            quality,
+            resolution: res,
+            fps,
             content_type,
             audio: share_audio,
             blocked,

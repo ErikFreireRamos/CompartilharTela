@@ -26,29 +26,15 @@ fn main() -> eframe::Result<()> {
     let rt = Arc::new(Runtime::new().expect("Falha ao criar runtime Tokio"));
     let session = RoomSession::new(data_dir, bin_dir);
 
-    #[allow(unused_mut)]
-    let mut options = eframe::NativeOptions {
+    let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("CompartilhadorDeTela")
             .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([960.0, 600.0]),
+            .with_min_inner_size([920.0, 580.0]),
         vsync: true,
+        multisampling: 0,
         ..Default::default()
     };
-
-    #[cfg(windows)]
-    {
-        use eframe::egui_wgpu::WgpuSetup;
-        use eframe::wgpu;
-
-        options.wgpu_options.present_mode = wgpu::PresentMode::Fifo;
-        if let WgpuSetup::CreateNew(ref mut setup) = options.wgpu_options.wgpu_setup {
-            // DX12 com fallback para OpenGL (GL) evita o bug do Vulkan (present mode 1000361000)
-            // ao mover a janela entre monitores e garante criação de superfície.
-            setup.instance_descriptor.backends = wgpu::Backends::DX12 | wgpu::Backends::GL;
-            setup.power_preference = wgpu::PowerPreference::LowPower;
-        }
-    }
 
     eframe::run_native(
         "CompartilhadorDeTela",

@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
-use ct_core::protocol::{MAX_PARTICIPANTS, RoomMeta, RoomWireMessage, WirePeer, decode_video_packet};
+use ct_core::protocol::{
+    MAX_PARTICIPANTS, RoomMeta, RoomWireMessage, WIRE_FRAME_AUDIO, WIRE_FRAME_VIDEO, WirePeer,
+};
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{RwLock, mpsc};
 
@@ -42,7 +44,6 @@ impl ClassicRoomHub {
             p.info.is_host = true;
             return;
         }
-        // Dummy channel for host if it hasn't connected via WS yet
         let (tx, _rx) = mpsc::channel(1);
         peers.insert(
             identity.clone(),
@@ -85,11 +86,20 @@ impl ClassicRoomHub {
         }
     }
 
-    async fn fanout_video(&self, sender_id: &str, data: axum::body::Bytes) {
+    async fn request_keyframes(&self) {
+        let msg = serde_json::to_string(&RoomWireMessage::RequestKeyframe).unwrap_or_default();
+        let peers_guard = self.peers.read().await;
+        for peer in peers_guard.values() {
+            if peer.info.sharing {
+                let _ = peer.tx.try_send(Message::Text(msg.clone().into()));
+            }
+        }
+    }
+
+    async fn fanout_media(&self, sender_id: &str, data: axum::body::Bytes) {
         let peers_guard = self.peers.read().await;
         for (id, peer) in peers_guard.iter() {
             if id != sender_id {
-                // try_send descarta frame se o receptor estiver lento (evita fila infinita/lag)
                 let _ = peer.tx.try_send(Message::Binary(data.clone()));
             }
         }
@@ -98,7 +108,6 @@ impl ClassicRoomHub {
     pub async fn handle_socket(self: Arc<Self>, ws: WebSocket) {
         let (mut ws_tx, mut ws_rx) = ws.split();
 
-        // Aguarda mensagem Hello com segredo válido
         let Some(Ok(Message::Text(hello_txt))) = ws_rx.next().await else {
             return;
         };
@@ -115,7 +124,7 @@ impl ClassicRoomHub {
             return;
         }
 
-        let (tx, mut rx) = mpsc::channel::<Message>(16);
+        let (tx, mut rx) = mpsc::channel::<Message>(24);
         let is_host = self.meta.read().await.host_id == identity;
         {
             let mut peers = self.peers.write().await;
@@ -140,6 +149,7 @@ impl ClassicRoomHub {
         }
 
         self.broadcast_state().await;
+        self.request_keyframes().await;
 
         let writer = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -163,8 +173,8 @@ impl ClassicRoomHub {
                     }
                 }
                 Message::Binary(bin) => {
-                    if decode_video_packet(&bin).is_some() {
-                        self.fanout_video(&identity, bin).await;
+                    if matches!(bin.first().copied(), Some(WIRE_FRAME_VIDEO | WIRE_FRAME_AUDIO)) {
+                        self.fanout_media(&identity, bin).await;
                     }
                 }
                 Message::Close(_) => break,

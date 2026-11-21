@@ -1,5 +1,7 @@
 //! Transporte em tempo real das salas:
-//!  - **P2P (Iroh)**: QUIC P2P com NAT traversal + relay automático (`IROH-<ticket>`), sem abrir portas.
+//!  - **P2P (Iroh)**: QUIC P2P com NAT traversal + relay automático (`IROH-<ticket>`), usando
+//!    streams persistentes ordenados (1 controle + 1 vídeo com backpressure + 1 áudio independente),
+//!    eliminando frames fora de ordem, pisca-pisca e explosão de streams QUIC.
 //!  - **Clássico (WebSocket)**: cliente `/ws/room` na porta 7880 para salas LiveKit (compatível com Electron).
 
 use std::collections::HashMap;
@@ -8,9 +10,10 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ct_core::adpcm::decode_stereo_f32;
 use ct_core::protocol::{
-    MAX_PARTICIPANTS, QualityId, RoomMeta, RoomScope, RoomWireMessage, WirePeer,
-    decode_video_packet,
+    MAX_PARTICIPANTS, QualityId, RoomMeta, RoomScope, RoomWireMessage, VideoPacketHeader,
+    WIRE_FRAME_AUDIO, WIRE_FRAME_VIDEO, WirePeer, decode_audio_packet, decode_video_packet,
 };
 use futures_util::{SinkExt, StreamExt};
 use iroh::endpoint::Connection;
@@ -21,10 +24,13 @@ use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-use crate::screen::{CapturedVideoFrame, decode_frame_jpeg};
+use crate::screen::{CapturedVideoFrame, RemoteVideoCanvas};
 
-pub const IROH_ALPN: &[u8] = b"compartilhartela/p2p/1";
+pub const IROH_ALPN: &[u8] = b"compartilhartela/p2p/2";
 pub const IROH_TICKET_PREFIX: &str = "IROH-";
+
+const STREAM_KIND_VIDEO: u8 = 1;
+const STREAM_KIND_AUDIO: u8 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IrohRoomTicket {
@@ -67,26 +73,31 @@ pub enum TransportEvent {
         identity: String,
         frame: CapturedVideoFrame,
     },
+    AudioSamples {
+        identity: String,
+        samples: Vec<f32>,
+    },
+    RequestKeyframe,
     RoomEnd {
         reason: String,
     },
     Disconnected,
 }
 
-async fn write_framed_json<W: AsyncWriteExt + Unpin>(
+async fn write_framed_bytes<W: AsyncWriteExt + Unpin>(
     w: &mut W,
-    msg: &RoomWireMessage,
+    data: &[u8],
 ) -> Result<(), std::io::Error> {
-    let data = serde_json::to_vec(msg).unwrap_or_default();
     let len = (data.len() as u32).to_le_bytes();
     w.write_all(&len).await?;
-    w.write_all(&data).await?;
+    w.write_all(data).await?;
     w.flush().await
 }
 
-async fn read_framed_json<R: AsyncReadExt + Unpin>(
+async fn read_framed_bytes<R: AsyncReadExt + Unpin>(
     r: &mut R,
-) -> Result<Option<RoomWireMessage>, std::io::Error> {
+    max_len: usize,
+) -> Result<Option<Vec<u8>>, std::io::Error> {
     let mut len_buf = [0u8; 4];
     match r.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -94,12 +105,63 @@ async fn read_framed_json<R: AsyncReadExt + Unpin>(
         Err(e) => return Err(e),
     }
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len == 0 || len > 512 * 1024 {
+    if len == 0 || len > max_len {
         return Ok(None);
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf).await?;
+    Ok(Some(buf))
+}
+
+async fn write_framed_json<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    msg: &RoomWireMessage,
+) -> Result<(), std::io::Error> {
+    let data = serde_json::to_vec(msg).unwrap_or_default();
+    write_framed_bytes(w, &data).await
+}
+
+async fn read_framed_json<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+) -> Result<Option<RoomWireMessage>, std::io::Error> {
+    let Some(buf) = read_framed_bytes(r, 512 * 1024).await? else {
+        return Ok(None);
+    };
     Ok(serde_json::from_slice(&buf).ok())
+}
+
+/// Abre um uni-stream persistente marcado com `stream_kind` e envia pacotes ordenados do canal.
+fn spawn_persistent_uni_sender(
+    conn: Connection,
+    stream_kind: u8,
+    mut rx: mpsc::Receiver<Arc<Vec<u8>>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let Ok(mut send) = conn.open_uni().await else {
+            return;
+        };
+        if send.write_all(&[stream_kind]).await.is_err() {
+            return;
+        }
+        while let Some(pkt) = rx.recv().await {
+            if write_framed_bytes(&mut send, &pkt).await.is_err() {
+                break;
+            }
+        }
+        let _ = send.finish();
+    })
+}
+
+/// Decodifica pacotes de vídeo ordenadamente em um canvas persistente por peer (fora da thread de UI).
+fn decode_video_into_canvases(
+    canvases: &mut HashMap<String, RemoteVideoCanvas>,
+    id: String,
+    hdr: VideoPacketHeader,
+    jpeg: &[u8],
+) -> Option<(String, CapturedVideoFrame)> {
+    let canvas = canvases.entry(id.clone()).or_default();
+    let frame = canvas.apply_packet(hdr, jpeg)?;
+    Some((id, frame))
 }
 
 // ============================================================================
@@ -108,8 +170,9 @@ async fn read_framed_json<R: AsyncReadExt + Unpin>(
 
 struct IrohRemotePeer {
     info: WirePeer,
-    conn: Connection,
     ctrl_tx: mpsc::Sender<RoomWireMessage>,
+    video_tx: mpsc::Sender<Arc<Vec<u8>>>,
+    audio_tx: mpsc::Sender<Arc<Vec<u8>>>,
 }
 
 struct IrohHostShared {
@@ -143,23 +206,32 @@ impl IrohHostShared {
         }
     }
 
+    async fn request_keyframes(&self) {
+        let _ = self.local_events.try_send(TransportEvent::RequestKeyframe);
+        let remotes = self.remotes.read().await;
+        for p in remotes.values() {
+            if p.info.sharing {
+                let _ = p.ctrl_tx.try_send(RoomWireMessage::RequestKeyframe);
+            }
+        }
+    }
+
     async fn fanout_video(&self, sender_id: &str, packet: Arc<Vec<u8>>) {
-        let conns: Vec<Connection> = {
-            let remotes = self.remotes.read().await;
-            remotes
-                .iter()
-                .filter(|(id, _)| id.as_str() != sender_id)
-                .map(|(_, p)| p.conn.clone())
-                .collect()
-        };
-        for conn in conns {
-            let data = packet.clone();
-            tokio::spawn(async move {
-                if let Ok(mut send) = conn.open_uni().await {
-                    let _ = send.write_all(&data).await;
-                    let _ = send.finish();
-                }
-            });
+        let remotes = self.remotes.read().await;
+        for (id, peer) in remotes.iter() {
+            if id != sender_id {
+                // Backpressure: try_send descarta frame se a conexão deste peer estiver saturada
+                let _ = peer.video_tx.try_send(packet.clone());
+            }
+        }
+    }
+
+    async fn fanout_audio(&self, sender_id: &str, packet: Arc<Vec<u8>>) {
+        let remotes = self.remotes.read().await;
+        for (id, peer) in remotes.iter() {
+            if id != sender_id {
+                let _ = peer.audio_tx.try_send(packet.clone());
+            }
         }
     }
 }
@@ -262,6 +334,12 @@ impl IrohRoomHost {
             .await;
     }
 
+    pub async fn send_audio_packet(&self, packet: Vec<u8>) {
+        self.shared
+            .fanout_audio(&self.shared.host_id, Arc::new(packet))
+            .await;
+    }
+
     pub async fn close(&self, reason: &str) {
         let msg = RoomWireMessage::RoomEnd {
             reason: reason.to_string(),
@@ -304,6 +382,10 @@ async fn handle_iroh_peer_connection(shared: Arc<IrohHostShared>, conn: Connecti
     }
 
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<RoomWireMessage>(32);
+    // Fila pequena (2 frames) evita acúmulo de latência mantendo entrega estritamente ordenada
+    let (video_tx, video_rx) = mpsc::channel::<Arc<Vec<u8>>>(2);
+    let (audio_tx, audio_rx) = mpsc::channel::<Arc<Vec<u8>>>(8);
+
     {
         let mut remotes = shared.remotes.write().await;
         if remotes.len() + 1 >= MAX_PARTICIPANTS && !remotes.contains_key(&identity) {
@@ -327,57 +409,108 @@ async fn handle_iroh_peer_connection(shared: Arc<IrohHostShared>, conn: Connecti
                     sharing: false,
                     has_audio: false,
                 },
-                conn: conn.clone(),
                 ctrl_tx,
+                video_tx,
+                audio_tx,
             },
         );
     }
 
     shared.broadcast_state().await;
+    shared.request_keyframes().await;
 
-    let writer = tokio::spawn(async move {
+    let ctrl_writer = tokio::spawn(async move {
         while let Some(msg) = ctrl_rx.recv().await {
             if write_framed_json(&mut send_bi, &msg).await.is_err() {
                 break;
             }
         }
     });
+    let video_writer = spawn_persistent_uni_sender(conn.clone(), STREAM_KIND_VIDEO, video_rx);
+    let audio_writer = spawn_persistent_uni_sender(conn.clone(), STREAM_KIND_AUDIO, audio_rx);
 
-    // Leitura de frames de vídeo enviados por este peer (uni streams)
+    // Leitura dos uni-streams persistentes de vídeo e áudio deste peer
     let shared_uni = shared.clone();
     let conn_uni = conn.clone();
     let peer_id_uni = identity.clone();
     let uni_reader = tokio::spawn(async move {
+        let mut child_tasks = Vec::new();
         while let Ok(mut recv_uni) = conn_uni.accept_uni().await {
             let shared_inner = shared_uni.clone();
             let sender_id = peer_id_uni.clone();
-            tokio::spawn(async move {
-                if let Ok(bytes) = recv_uni.read_to_end(4 * 1024 * 1024).await
-                    && let Some((id, _w, _h, seq, jpeg)) = decode_video_packet(&bytes)
-                {
-                    if let Some(frame) = decode_frame_jpeg(jpeg, seq) {
-                        let _ = shared_inner
-                            .local_events
-                            .try_send(TransportEvent::VideoFrame { identity: id, frame });
+            let t = tokio::spawn(async move {
+                let mut kind = [0u8; 1];
+                if recv_uni.read_exact(&mut kind).await.is_err() {
+                    return;
+                }
+                match kind[0] {
+                    STREAM_KIND_VIDEO => {
+                        let mut canvases: HashMap<String, RemoteVideoCanvas> = HashMap::new();
+                        while let Ok(Some(bytes)) =
+                            read_framed_bytes(&mut recv_uni, 4 * 1024 * 1024).await
+                        {
+                            let arc_bytes = Arc::new(bytes);
+                            shared_inner.fanout_video(&sender_id, arc_bytes.clone()).await;
+                            if let Some((id, hdr, jpeg)) = decode_video_packet(&arc_bytes)
+                                && let Some((fid, frame)) =
+                                    decode_video_into_canvases(&mut canvases, id, hdr, jpeg)
+                            {
+                                let _ = shared_inner.local_events.try_send(
+                                    TransportEvent::VideoFrame {
+                                        identity: fid,
+                                        frame,
+                                    },
+                                );
+                            }
+                        }
                     }
-                    shared_inner.fanout_video(&sender_id, Arc::new(bytes)).await;
+                    STREAM_KIND_AUDIO => {
+                        while let Ok(Some(bytes)) =
+                            read_framed_bytes(&mut recv_uni, 256 * 1024).await
+                        {
+                            let arc_bytes = Arc::new(bytes);
+                            shared_inner.fanout_audio(&sender_id, arc_bytes.clone()).await;
+                            if let Some((id, _seq, adpcm)) = decode_audio_packet(&arc_bytes)
+                                && let Some(samples) = decode_stereo_f32(adpcm)
+                            {
+                                let _ = shared_inner.local_events.try_send(
+                                    TransportEvent::AudioSamples {
+                                        identity: id,
+                                        samples,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             });
+            child_tasks.push(t);
+        }
+        for t in child_tasks {
+            t.abort();
         }
     });
 
-    // Leitura de mensagens de controle deste peer
     while let Ok(Some(msg)) = read_framed_json(&mut recv_bi).await {
-        if let RoomWireMessage::ShareState { sharing, has_audio } = msg {
-            if let Some(p) = shared.remotes.write().await.get_mut(&identity) {
-                p.info.sharing = sharing;
-                p.info.has_audio = has_audio;
+        match msg {
+            RoomWireMessage::ShareState { sharing, has_audio } => {
+                if let Some(p) = shared.remotes.write().await.get_mut(&identity) {
+                    p.info.sharing = sharing;
+                    p.info.has_audio = has_audio;
+                }
+                shared.broadcast_state().await;
             }
-            shared.broadcast_state().await;
+            RoomWireMessage::RequestKeyframe => {
+                shared.request_keyframes().await;
+            }
+            _ => {}
         }
     }
 
-    writer.abort();
+    ctrl_writer.abort();
+    video_writer.abort();
+    audio_writer.abort();
     uni_reader.abort();
     shared.remotes.write().await.remove(&identity);
     shared.broadcast_state().await;
@@ -391,8 +524,9 @@ pub enum RoomTransport {
     IrohHost(IrohRoomHost),
     IrohClient {
         endpoint: Endpoint,
-        conn: Connection,
         ctrl_tx: mpsc::Sender<RoomWireMessage>,
+        video_tx: mpsc::Sender<Arc<Vec<u8>>>,
+        audio_tx: mpsc::Sender<Arc<Vec<u8>>>,
         tasks: Vec<JoinHandle<()>>,
     },
     ClassicWs {
@@ -438,6 +572,9 @@ impl RoomTransport {
         .map_err(|e| format!("Falha ao autenticar na sala Iroh: {e}"))?;
 
         let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<RoomWireMessage>(32);
+        let (video_tx, video_rx) = mpsc::channel::<Arc<Vec<u8>>>(2);
+        let (audio_tx, audio_rx) = mpsc::channel::<Arc<Vec<u8>>>(8);
+
         let t_write = tokio::spawn(async move {
             while let Some(msg) = ctrl_rx.recv().await {
                 if write_framed_json(&mut send_bi, &msg).await.is_err() {
@@ -445,6 +582,8 @@ impl RoomTransport {
                 }
             }
         });
+        let t_vid_tx = spawn_persistent_uni_sender(conn.clone(), STREAM_KIND_VIDEO, video_rx);
+        let t_aud_tx = spawn_persistent_uni_sender(conn.clone(), STREAM_KIND_AUDIO, audio_rx);
 
         let ev_ctrl = events_tx.clone();
         let t_read = tokio::spawn(async move {
@@ -452,6 +591,9 @@ impl RoomTransport {
                 match msg {
                     RoomWireMessage::RoomState { meta, peers } => {
                         let _ = ev_ctrl.try_send(TransportEvent::RoomState { meta, peers });
+                    }
+                    RoomWireMessage::RequestKeyframe => {
+                        let _ = ev_ctrl.try_send(TransportEvent::RequestKeyframe);
                     }
                     RoomWireMessage::RoomEnd { reason } => {
                         let _ = ev_ctrl.try_send(TransportEvent::RoomEnd { reason });
@@ -466,27 +608,61 @@ impl RoomTransport {
         let conn_uni = conn.clone();
         let ev_uni = events_tx;
         let t_uni = tokio::spawn(async move {
+            let mut child_tasks = Vec::new();
             while let Ok(mut recv_uni) = conn_uni.accept_uni().await {
                 let ev = ev_uni.clone();
-                tokio::spawn(async move {
-                    if let Ok(bytes) = recv_uni.read_to_end(4 * 1024 * 1024).await
-                        && let Some((id, _w, _h, seq, jpeg)) = decode_video_packet(&bytes)
-                        && let Some(frame) = decode_frame_jpeg(jpeg, seq)
-                    {
-                        let _ = ev.try_send(TransportEvent::VideoFrame {
-                            identity: id,
-                            frame,
-                        });
+                let t = tokio::spawn(async move {
+                    let mut kind = [0u8; 1];
+                    if recv_uni.read_exact(&mut kind).await.is_err() {
+                        return;
+                    }
+                    match kind[0] {
+                        STREAM_KIND_VIDEO => {
+                            let mut canvases: HashMap<String, RemoteVideoCanvas> = HashMap::new();
+                            while let Ok(Some(bytes)) =
+                                read_framed_bytes(&mut recv_uni, 4 * 1024 * 1024).await
+                            {
+                                if let Some((id, hdr, jpeg)) = decode_video_packet(&bytes)
+                                    && let Some((fid, frame)) =
+                                        decode_video_into_canvases(&mut canvases, id, hdr, jpeg)
+                                {
+                                    let _ = ev.try_send(TransportEvent::VideoFrame {
+                                        identity: fid,
+                                        frame,
+                                    });
+                                }
+                            }
+                        }
+                        STREAM_KIND_AUDIO => {
+                            while let Ok(Some(bytes)) =
+                                read_framed_bytes(&mut recv_uni, 256 * 1024).await
+                            {
+                                if let Some((id, _seq, adpcm)) = decode_audio_packet(&bytes)
+                                    && let Some(samples) = decode_stereo_f32(adpcm)
+                                {
+                                    let _ = ev.try_send(TransportEvent::AudioSamples {
+                                        identity: id,
+                                        samples,
+                                    });
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 });
+                child_tasks.push(t);
+            }
+            for t in child_tasks {
+                t.abort();
             }
         });
 
         Ok(RoomTransport::IrohClient {
             endpoint,
-            conn,
             ctrl_tx,
-            tasks: vec![t_write, t_read, t_uni],
+            video_tx,
+            audio_tx,
+            tasks: vec![t_write, t_vid_tx, t_aud_tx, t_read, t_uni],
         })
     }
 
@@ -517,7 +693,7 @@ impl RoomTransport {
             .await
             .map_err(|e| format!("Falha ao enviar Hello: {e}"))?;
 
-        let (tx, mut rx) = mpsc::channel::<WsMsg>(16);
+        let (tx, mut rx) = mpsc::channel::<WsMsg>(24);
         let t_write = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
                 if ws_tx.send(msg).await.is_err() {
@@ -527,6 +703,7 @@ impl RoomTransport {
         });
 
         let t_read = tokio::spawn(async move {
+            let mut canvases: HashMap<String, RemoteVideoCanvas> = HashMap::new();
             while let Some(Ok(msg)) = ws_rx.next().await {
                 match msg {
                     WsMsg::Text(txt) => {
@@ -535,6 +712,9 @@ impl RoomTransport {
                                 RoomWireMessage::RoomState { meta, peers } => {
                                     let _ = events_tx
                                         .try_send(TransportEvent::RoomState { meta, peers });
+                                }
+                                RoomWireMessage::RequestKeyframe => {
+                                    let _ = events_tx.try_send(TransportEvent::RequestKeyframe);
                                 }
                                 RoomWireMessage::RoomEnd { reason } => {
                                     let _ = events_tx
@@ -545,16 +725,30 @@ impl RoomTransport {
                             }
                         }
                     }
-                    WsMsg::Binary(bin) => {
-                        if let Some((id, _w, _h, seq, jpeg)) = decode_video_packet(&bin)
-                            && let Some(frame) = decode_frame_jpeg(jpeg, seq)
-                        {
-                            let _ = events_tx.try_send(TransportEvent::VideoFrame {
-                                identity: id,
-                                frame,
-                            });
+                    WsMsg::Binary(bin) => match bin.first().copied() {
+                        Some(WIRE_FRAME_VIDEO) => {
+                            if let Some((id, hdr, jpeg)) = decode_video_packet(&bin)
+                                && let Some((fid, frame)) =
+                                    decode_video_into_canvases(&mut canvases, id, hdr, jpeg)
+                            {
+                                let _ = events_tx.try_send(TransportEvent::VideoFrame {
+                                    identity: fid,
+                                    frame,
+                                });
+                            }
                         }
-                    }
+                        Some(WIRE_FRAME_AUDIO) => {
+                            if let Some((id, _seq, adpcm)) = decode_audio_packet(&bin)
+                                && let Some(samples) = decode_stereo_f32(adpcm)
+                            {
+                                let _ = events_tx.try_send(TransportEvent::AudioSamples {
+                                    identity: id,
+                                    samples,
+                                });
+                            }
+                        }
+                        _ => {}
+                    },
                     WsMsg::Close(_) => break,
                     _ => {}
                 }
@@ -572,12 +766,12 @@ impl RoomTransport {
         match self {
             RoomTransport::IrohHost(host) => host.set_host_sharing(sharing, has_audio).await,
             RoomTransport::IrohClient { ctrl_tx, .. } => {
-                let _ = ctrl_tx
-                    .try_send(RoomWireMessage::ShareState { sharing, has_audio });
+                let _ = ctrl_tx.try_send(RoomWireMessage::ShareState { sharing, has_audio });
             }
             RoomTransport::ClassicWs { tx, .. } => {
-                let txt = serde_json::to_string(&RoomWireMessage::ShareState { sharing, has_audio })
-                    .unwrap_or_default();
+                let txt =
+                    serde_json::to_string(&RoomWireMessage::ShareState { sharing, has_audio })
+                        .unwrap_or_default();
                 let _ = tx.try_send(WsMsg::Text(txt.into()));
             }
         }
@@ -586,14 +780,20 @@ impl RoomTransport {
     pub async fn send_video_packet(&self, packet: Vec<u8>) {
         match self {
             RoomTransport::IrohHost(host) => host.send_video_packet(packet).await,
-            RoomTransport::IrohClient { conn, .. } => {
-                let c = conn.clone();
-                tokio::spawn(async move {
-                    if let Ok(mut send) = c.open_uni().await {
-                        let _ = send.write_all(&packet).await;
-                        let _ = send.finish();
-                    }
-                });
+            RoomTransport::IrohClient { video_tx, .. } => {
+                let _ = video_tx.try_send(Arc::new(packet));
+            }
+            RoomTransport::ClassicWs { tx, .. } => {
+                let _ = tx.try_send(WsMsg::Binary(packet.into()));
+            }
+        }
+    }
+
+    pub async fn send_audio_packet(&self, packet: Vec<u8>) {
+        match self {
+            RoomTransport::IrohHost(host) => host.send_audio_packet(packet).await,
+            RoomTransport::IrohClient { audio_tx, .. } => {
+                let _ = audio_tx.try_send(Arc::new(packet));
             }
             RoomTransport::ClassicWs { tx, .. } => {
                 let _ = tx.try_send(WsMsg::Binary(packet.into()));

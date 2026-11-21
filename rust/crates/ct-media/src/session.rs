@@ -1,15 +1,18 @@
 //! Máquina de estados da sala (`RoomSession`), suportando:
-//!  - **P2P (Iroh)**: QUIC direto + relay automático, sem abrir portas nem `livekit-server.exe`.
+//!  - **P2P (Iroh)**: QUIC direto + relay automático, vídeo delta 4:2:0 + áudio IMA-ADPCM.
 //!  - **Clássico (LiveKit)**: compatível com o app Electron antigo + hub WebSocket `/ws/room`.
+//!  - Alteração ao vivo de resolução, FPS, volume e apps bloqueados durante a transmissão.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use ct_core::adpcm::encode_stereo_f32;
 use ct_core::protocol::{
-    ContentType, PUBLIC_PORT, QualityId, QualityPreset, RoomMeta, RoomMode, RoomScope,
-    encode_video_packet, preset_by_id,
+    ContentType, PUBLIC_PORT, QualityId, ResolutionId, RoomMeta, RoomMode, RoomScope,
+    encode_audio_packet, encode_video_packet,
 };
 use ct_core::room_code::{
     RoomAddress, decode_room_code, encode_room_code, generate_room_secret,
@@ -28,10 +31,11 @@ use serde_json::json;
 use tokio::sync::{Mutex, mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::audio::{AudioApp, AudioCaptureEngine, AudioMode};
+use crate::audio::{AudioApp, AudioCaptureEngine, AudioMode, AudioPlaybackMixer};
 use crate::p2p::{IrohRoomHost, IrohRoomTicket, RoomTransport, TransportEvent, is_iroh_ticket};
 use crate::screen::{
-    CapturedVideoFrame, ScreenCapturer, ScreenSource, encode_frame_jpeg, list_screen_sources,
+    CapturedVideoFrame, DeltaVideoEncoder, LiveCaptureConfig, ScreenCapturer, ScreenSource,
+    list_screen_sources,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +90,8 @@ pub struct StreamView {
 #[derive(Debug, Clone)]
 pub struct ShareOptions {
     pub source_id: String,
-    pub quality: QualityId,
+    pub resolution: ResolutionId,
+    pub fps: u32,
     pub content_type: ContentType,
     pub audio: bool,
     pub blocked: Vec<String>,
@@ -95,10 +100,17 @@ pub struct ShareOptions {
 
 #[derive(Debug, Clone)]
 pub struct ActiveShare {
-    pub preset: QualityPreset,
+    pub resolution: ResolutionId,
+    pub fps: u32,
     pub content_type: ContentType,
     pub audio_mode: AudioMode,
     pub warning: Option<String>,
+}
+
+impl ActiveShare {
+    pub fn label(&self) -> String {
+        format!("{} · {} fps", self.resolution.label(), self.fps)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +130,10 @@ pub struct SessionSnapshot {
 impl SessionSnapshot {
     pub fn is_host(&self) -> bool {
         self.info.as_ref().is_some_and(|i| i.is_host)
+    }
+
+    pub fn mode(&self) -> Option<RoomMode> {
+        self.info.as_ref().map(|i| i.mode)
     }
 
     pub fn code(&self) -> &str {
@@ -151,8 +167,12 @@ pub struct RoomSession {
     lan_responder: Mutex<Option<LanResponder>>,
     transport: Mutex<Option<Arc<RoomTransport>>>,
     event_pump: Mutex<Option<JoinHandle<()>>>,
+    video_pump: Mutex<Option<JoinHandle<()>>>,
+    audio_pump: Mutex<Option<JoinHandle<()>>>,
     audio: Mutex<AudioCaptureEngine>,
+    playback: AudioPlaybackMixer,
     capturer: Mutex<Option<ScreenCapturer>>,
+    force_keyframe: Arc<AtomicBool>,
     receive_modes: Mutex<HashMap<String, ReceiveQuality>>,
     frames: std::sync::RwLock<HashMap<String, CapturedVideoFrame>>,
     repaint_cb: std::sync::RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -192,8 +212,12 @@ impl RoomSession {
             lan_responder: Mutex::new(None),
             transport: Mutex::new(None),
             event_pump: Mutex::new(None),
+            video_pump: Mutex::new(None),
+            audio_pump: Mutex::new(None),
             audio: Mutex::new(AudioCaptureEngine::new()),
+            playback: AudioPlaybackMixer::new(),
             capturer: Mutex::new(None),
+            force_keyframe: Arc::new(AtomicBool::new(true)),
             receive_modes: Mutex::new(HashMap::new()),
             frames: std::sync::RwLock::new(HashMap::new()),
             repaint_cb: std::sync::RwLock::new(None),
@@ -237,7 +261,13 @@ impl RoomSession {
     }
 
     pub async fn list_audio_apps(&self, blocked: &[String]) -> Vec<AudioApp> {
-        self.audio.lock().await.list_apps(blocked)
+        let blocked_owned = blocked.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let tmp = AudioCaptureEngine::new();
+            tmp.list_apps(&blocked_owned)
+        })
+        .await
+        .unwrap_or_default()
     }
 
     pub async fn update_settings<F>(&self, mutate: F)
@@ -259,9 +289,11 @@ impl RoomSession {
         self.update_settings(|s| s.send_volume = volume).await;
     }
 
-    pub async fn set_peer_volume(&self, name: String, volume: f32) {
+    pub async fn set_peer_volume(&self, identity: String, name: String, volume: f32) {
+        let v = volume.clamp(0.0, 2.0);
+        self.playback.set_peer_volume(&identity, v);
         self.update_settings(|s| {
-            s.volumes.insert(name, volume.clamp(0.0, 2.0));
+            s.volumes.insert(name, v);
         })
         .await;
     }
@@ -271,9 +303,30 @@ impl RoomSession {
             .lock()
             .await
             .insert(identity.clone(), mode);
+        if mode == ReceiveQuality::Off {
+            self.playback.remove_peer(&identity);
+        }
         self.snapshot_tx.send_modify(|s| {
             if let Some(stream) = s.streams.iter_mut().find(|st| st.identity == identity) {
                 stream.receive = mode;
+            }
+        });
+        self.request_repaint();
+    }
+
+    /// Altera resolução e/ou FPS ao vivo durante a transmissão sem interromper o compartilhamento.
+    pub async fn update_share_quality(&self, resolution: ResolutionId, fps: u32) {
+        let fps = fps.clamp(15, 60);
+        if let Some(ref cap) = *self.capturer.lock().await {
+            cap.update_config(LiveCaptureConfig::from_res_fps(resolution, fps));
+        }
+        self.force_keyframe.store(true, Ordering::SeqCst);
+        let qid = resolution.to_quality_id(fps);
+        self.update_settings(|s| s.quality = qid).await;
+        self.snapshot_tx.send_modify(|s| {
+            if let Some(ref mut share) = s.share {
+                share.resolution = resolution;
+                share.fps = fps;
             }
         });
         self.request_repaint();
@@ -304,7 +357,7 @@ impl RoomSession {
         let secret = generate_room_secret();
         match mode {
             RoomMode::Iroh => {
-                let (ev_tx, ev_rx) = mpsc::channel(64);
+                let (ev_tx, ev_rx) = mpsc::channel(128);
                 let client_id = self.settings.lock().await.get().client_id.clone();
                 match IrohRoomHost::start(secret, client_id.clone(), nickname.clone(), ev_tx).await
                 {
@@ -351,7 +404,7 @@ impl RoomSession {
             }
             RoomMode::Classic => match self.become_classic_host(secret, 1, nickname.clone()).await {
                 Ok((info, meta)) => {
-                    let (ev_tx, ev_rx) = mpsc::channel(64);
+                    let (ev_tx, ev_rx) = mpsc::channel(128);
                     let ws_url = format!("ws://127.0.0.1:{PUBLIC_PORT}/ws/room");
                     if let Ok(tr) = RoomTransport::connect_classic_ws(
                         &ws_url,
@@ -405,7 +458,7 @@ impl RoomSession {
             };
             let client_id = self.settings.lock().await.get().client_id.clone();
             let secret = ticket.secret;
-            let (ev_tx, ev_rx) = mpsc::channel(64);
+            let (ev_tx, ev_rx) = mpsc::channel(128);
             match RoomTransport::connect_iroh_client(
                 ticket,
                 client_id.clone(),
@@ -452,7 +505,6 @@ impl RoomSession {
             return;
         }
 
-        // Modo Clássico (código IPv4/IPv6 de 12 ou 32 caracteres)
         let addr = match decode_room_code(&code) {
             Ok(a) => a,
             Err(e) => {
@@ -465,7 +517,7 @@ impl RoomSession {
             .await
         {
             Ok((info, target_ip)) => {
-                let (ev_tx, ev_rx) = mpsc::channel(64);
+                let (ev_tx, ev_rx) = mpsc::channel(128);
                 let ws_url = format!("ws://{}:{PUBLIC_PORT}/ws/room", url_host(&target_ip));
                 if let Ok(tr) = RoomTransport::connect_classic_ws(
                     &ws_url,
@@ -557,11 +609,46 @@ impl RoomSession {
                             .copied()
                             == Some(ReceiveQuality::Off);
                         if !is_off {
-                            if let Ok(mut map) = session.frames.write() {
-                                map.insert(identity, frame);
+                            let updated = if let Ok(mut map) = session.frames.write() {
+                                let should_replace = map
+                                    .get(&identity)
+                                    .is_none_or(|prev| frame.seq > prev.seq || frame.width != prev.width || frame.height != prev.height);
+                                if should_replace {
+                                    map.insert(identity, frame);
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if updated {
+                                session.request_repaint();
                             }
-                            session.request_repaint();
                         }
+                    }
+                    TransportEvent::AudioSamples { identity, samples } => {
+                        let is_off = session
+                            .receive_modes
+                            .lock()
+                            .await
+                            .get(&identity)
+                            .copied()
+                            == Some(ReceiveQuality::Off);
+                        if !is_off {
+                            let snap = session.snapshot();
+                            let peer_name = snap
+                                .peers
+                                .iter()
+                                .find(|p| p.identity == identity)
+                                .map(|p| p.name.clone())
+                                .unwrap_or_else(|| identity.clone());
+                            let vol = snap.volume_of(&peer_name);
+                            session.playback.push_samples(&identity, &samples, vol);
+                        }
+                    }
+                    TransportEvent::RequestKeyframe => {
+                        session.force_keyframe.store(true, Ordering::SeqCst);
                     }
                     TransportEvent::RoomEnd { reason } => {
                         session.reset_with_error(Some(reason)).await;
@@ -602,29 +689,35 @@ impl RoomSession {
 
     pub async fn start_share(self: &Arc<Self>, opts: ShareOptions) -> Result<(), String> {
         self.stop_share().await;
-        let preset = preset_by_id(opts.quality);
         let mut audio_mode = AudioMode::None;
         let mut warning = None;
+        let mut audio_rx_opt = None;
 
         if opts.audio {
             let mut audio = self.audio.lock().await;
             audio.set_send_volume(opts.send_volume);
-            match audio.start(&opts.blocked).await {
-                Ok(_consumer) => {
-                    audio_mode = AudioMode::Native;
+            match audio.start(&opts.blocked) {
+                Ok((mode, rx)) => {
+                    audio_mode = mode;
+                    audio_rx_opt = Some(rx);
+                    if mode == AudioMode::System {
+                        warning = Some(
+                            "Bloqueio por app indisponível neste Windows. Transmitindo áudio do sistema inteiro."
+                                .to_string(),
+                        );
+                    }
                 }
                 Err(err) => {
-                    warning = Some(format!(
-                        "Bloqueio de apps indisponível ({err}). O áudio de todo o PC será transmitido."
-                    ));
-                    audio_mode = AudioMode::System;
+                    warning = Some(format!("Áudio indisponível: {err}"));
                 }
             }
         }
 
-        let capturer = ScreenCapturer::start(opts.source_id.clone(), preset);
+        let live_cfg = LiveCaptureConfig::from_res_fps(opts.resolution, opts.fps);
+        let capturer = ScreenCapturer::start(opts.source_id.clone(), live_cfg);
         let mut frame_rx = capturer.subscribe();
         *self.capturer.lock().await = Some(capturer);
+        self.force_keyframe.store(true, Ordering::SeqCst);
 
         let local_id = self.settings.lock().await.get().client_id.clone();
         let local_name = self.settings.lock().await.get().nickname.clone();
@@ -636,7 +729,8 @@ impl RoomSession {
 
         self.snapshot_tx.send_modify(|s| {
             s.share = Some(ActiveShare {
-                preset,
+                resolution: opts.resolution,
+                fps: opts.fps,
                 content_type: opts.content_type,
                 audio_mode,
                 warning,
@@ -660,8 +754,15 @@ impl RoomSession {
         });
         self.request_repaint();
 
+        // Pipeline de vídeo: Dirty-Rect + JPEG 4:2:0 em thread bloqueante + envio ordenado
         let session_weak = Arc::downgrade(self);
-        tokio::spawn(async move {
+        let vid_id = local_id.clone();
+        let jpeg_quality = match opts.content_type {
+            ContentType::Detail => 78u8,
+            ContentType::Motion => 62u8,
+        };
+        let video_handle = tokio::spawn(async move {
+            let encoder = Arc::new(std::sync::Mutex::new(DeltaVideoEncoder::new()));
             while frame_rx.changed().await.is_ok() {
                 let Some(session) = session_weak.upgrade() else {
                     break;
@@ -669,37 +770,70 @@ impl RoomSession {
                 let frame = frame_rx.borrow().clone();
                 if let Some(frame) = frame {
                     if let Ok(mut map) = session.frames.write() {
-                        map.insert(local_id.clone(), frame.clone());
+                        map.insert(vid_id.clone(), frame.clone());
                     }
                     session.request_repaint();
 
                     if let Some(tr) = session.transport.lock().await.clone() {
-                        let id_clone = local_id.clone();
-                        let encoded = tokio::task::spawn_blocking(move || {
-                            let jpeg = encode_frame_jpeg(&frame, 75)?;
-                            Some(encode_video_packet(
-                                &id_clone,
-                                frame.width,
-                                frame.height,
-                                frame.seq,
-                                &jpeg,
-                            ))
+                        let force_key = session.force_keyframe.swap(false, Ordering::SeqCst);
+                        let enc_ref = encoder.clone();
+                        let id_clone = vid_id.clone();
+                        let pkt = tokio::task::spawn_blocking(move || {
+                            let mut enc = enc_ref.lock().ok()?;
+                            let (hdr, jpeg) = enc.encode(&frame, jpeg_quality, force_key)?;
+                            Some(encode_video_packet(&id_clone, hdr, &jpeg))
                         })
                         .await
                         .ok()
                         .flatten();
-                        if let Some(pkt) = encoded {
+
+                        if let Some(pkt) = pkt {
                             tr.send_video_packet(pkt).await;
                         }
                     }
                 }
             }
         });
+        *self.video_pump.lock().await = Some(video_handle);
+
+        // Pipeline de áudio: PCM 48 kHz estéreo -> IMA-ADPCM 4:1 -> stream ordenado dedicado
+        if let Some(mut audio_rx) = audio_rx_opt {
+            let session_weak = Arc::downgrade(self);
+            let aud_id = local_id;
+            let audio_handle = tokio::spawn(async move {
+                let mut seq = 0u64;
+                while let Some(chunk) = audio_rx.recv().await {
+                    let Some(session) = session_weak.upgrade() else {
+                        break;
+                    };
+                    // Pula envio de blocos 100% silenciosos para economizar banda
+                    let peak = chunk.iter().fold(0.0f32, |acc, &s| acc.max(s.abs()));
+                    if peak < 1e-4 {
+                        continue;
+                    }
+                    if let Some(tr) = session.transport.lock().await.clone() {
+                        seq += 1;
+                        let adpcm = encode_stereo_f32(&chunk);
+                        if !adpcm.is_empty() {
+                            let pkt = encode_audio_packet(&aud_id, seq, &adpcm);
+                            tr.send_audio_packet(pkt).await;
+                        }
+                    }
+                }
+            });
+            *self.audio_pump.lock().await = Some(audio_handle);
+        }
 
         Ok(())
     }
 
     pub async fn stop_share(&self) {
+        if let Some(h) = self.video_pump.lock().await.take() {
+            h.abort();
+        }
+        if let Some(h) = self.audio_pump.lock().await.take() {
+            h.abort();
+        }
         if let Some(mut cap) = self.capturer.lock().await.take() {
             cap.stop();
         }
@@ -912,6 +1046,7 @@ impl RoomSession {
             pump.abort();
         }
         self.stop_share().await;
+        self.playback.clear();
         if let Some(tr) = self.transport.lock().await.take()
             && let Ok(owned) = Arc::try_unwrap(tr)
         {

@@ -17,7 +17,7 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 bytes = "1"
 directories = "6"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.31"
 futures-util = "0.3"
 if-addrs = "0.13"
@@ -28,7 +28,6 @@ jsonwebtoken = "9"
 quick-xml = "0.37"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-ringbuf = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socket2 = { version = "0.5", features = ["all"] }
