@@ -41,11 +41,11 @@ fn main() -> eframe::Result<()> {
         use eframe::egui_wgpu::WgpuSetup;
         use eframe::wgpu;
 
-        options.wgpu_options.present_mode = wgpu::PresentMode::AutoVsync;
+        options.wgpu_options.present_mode = wgpu::PresentMode::Fifo;
         if let WgpuSetup::CreateNew(ref mut setup) = options.wgpu_options.wgpu_setup {
-            // DX12 exclusivo no Windows evita o bug do Vulkan (present mode 1000361000)
-            // ao mover a janela entre monitores.
-            setup.instance_descriptor.backends = wgpu::Backends::DX12;
+            // DX12 com fallback para OpenGL (GL) evita o bug do Vulkan (present mode 1000361000)
+            // ao mover a janela entre monitores e garante criação de superfície.
+            setup.instance_descriptor.backends = wgpu::Backends::DX12 | wgpu::Backends::GL;
             setup.power_preference = wgpu::PowerPreference::LowPower;
         }
     }
