@@ -24,10 +24,13 @@ pub struct CompartilharApp {
     pub snap_rx: watch::Receiver<SessionSnapshot>,
     pub snap: SessionSnapshot,
 
-    // Identidade visual (ícone da janela/pop-out, textura do logo e tema ativo)
+    // Identidade visual (ícone da janela/pop-out, textura do logo, tema ativo e cor RGB personalizada)
     pub app_icon: Option<IconData>,
     pub logo_texture: Option<TextureHandle>,
     pub active_theme: ThemeId,
+    pub custom_accent: [u8; 3],
+    pub show_color_picker: bool,
+    pub pending_accent_save: bool,
 
     // Home UI state
     pub nickname_input: String,
@@ -76,6 +79,7 @@ impl CompartilharApp {
         let selected_fps = snap.settings.fps;
         let selected_audio_quality = snap.settings.audio_quality;
         let active_theme = snap.settings.theme;
+        let custom_accent = snap.settings.custom_accent;
         let gpu_adapters = session.list_gpu_adapters();
         let selected_gpu_idx = gpu_adapters
             .iter()
@@ -91,6 +95,9 @@ impl CompartilharApp {
             app_icon,
             logo_texture,
             active_theme,
+            custom_accent,
+            show_color_picker: false,
+            pending_accent_save: false,
             nickname_input,
             code_input: String::new(),
             focused_id: None,
@@ -116,19 +123,53 @@ impl CompartilharApp {
     }
 
     pub fn palette(&self) -> theme::ThemePalette {
-        theme::ThemePalette::for_theme(self.active_theme)
+        theme::ThemePalette::for_theme(self.active_theme, self.custom_accent)
     }
 
     pub fn set_theme(&mut self, ctx: &Context, new_theme: ThemeId) {
-        if self.active_theme == new_theme {
+        self.active_theme = new_theme;
+        theme::apply_theme_accent(ctx, new_theme, self.custom_accent);
+        let rgb = self.custom_accent;
+        let session = self.session.clone();
+        // Salva imediatamente de forma síncrona para garantir persistência mesmo se fechar o app logo em seguida
+        self.rt.block_on(async move {
+            session
+                .update_settings(|s| {
+                    s.theme = new_theme;
+                    s.custom_accent = rgb;
+                })
+                .await;
+        });
+        self.pending_accent_save = false;
+    }
+
+    pub fn set_custom_accent_live(&mut self, ctx: &Context, rgb: [u8; 3], persist_now: bool) {
+        self.active_theme = ThemeId::Custom;
+        self.custom_accent = rgb;
+        theme::apply_theme_accent(ctx, ThemeId::Custom, rgb);
+        if persist_now {
+            self.flush_theme_settings();
+        } else {
+            self.pending_accent_save = true;
+        }
+    }
+
+    pub fn flush_theme_settings(&mut self) {
+        if !self.pending_accent_save && self.active_theme == self.snap.settings.theme && self.custom_accent == self.snap.settings.custom_accent {
             return;
         }
-        self.active_theme = new_theme;
-        theme::apply_theme_accent(ctx, new_theme);
+        let theme = self.active_theme;
+        let rgb = self.custom_accent;
         let session = self.session.clone();
-        self.rt.spawn(async move {
-            session.update_settings(|s| s.theme = new_theme).await;
+        self.rt.block_on(async move {
+            session
+                .update_settings(|s| {
+                    s.theme = theme;
+                    s.custom_accent = rgb;
+                })
+                .await;
         });
+        self.pending_accent_save = false;
     }
 
     pub fn refresh_audio_apps_async(&self, ctx: &Context) {
@@ -221,10 +262,16 @@ impl eframe::App for CompartilharApp {
         }
         self.sync_textures(ctx);
 
-        if ctx.input(|i| i.viewport().close_requested())
-            && self.snap.phase != Phase::Idle
-            && !self.closing_room
-        {
+        if self.pending_accent_save && !ctx.input(|i| i.pointer.any_down()) {
+            self.flush_theme_settings();
+        }
+
+        let close_requested = ctx.input(|i| i.viewport().close_requested());
+        if close_requested {
+            self.flush_theme_settings();
+        }
+
+        if close_requested && self.snap.phase != Phase::Idle && !self.closing_room {
             self.closing_room = true;
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             let session = self.session.clone();
@@ -246,7 +293,10 @@ impl eframe::App for CompartilharApp {
                 self.popout_fullscreen.clear();
                 home::render_home(self, ctx);
             }
-            Phase::Connected | Phase::Migrating => room::render_room(self, ctx),
+            Phase::Connected | Phase::Migrating => {
+                self.show_color_picker = false;
+                room::render_room(self, ctx);
+            }
         }
 
         if self.snap.phase == Phase::Connecting || self.snap.phase == Phase::Migrating {

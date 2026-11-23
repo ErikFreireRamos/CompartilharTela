@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod ui;
 
 use std::sync::Arc;
@@ -9,18 +11,20 @@ use tokio::runtime::Runtime;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> eframe::Result<()> {
-    std::panic::set_hook(Box::new(|info| {
-        eprintln!("[PANIC] {info}");
-    }));
-
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
-        .init();
-
     let profile = std::env::args()
         .find_map(|a| a.strip_prefix("--profile=").map(ToString::to_string));
 
     let data_dir = SettingsStore::default_data_dir(profile.as_deref());
+    let crash_log = data_dir.join("pit-crash.log");
+
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = std::fs::create_dir_all(crash_log.parent().unwrap_or(std::path::Path::new(".")));
+        let _ = std::fs::write(&crash_log, format!("[PANIC] {info}\n"));
+    }));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse().unwrap()))
+        .try_init();
 
     let rt = Arc::new(Runtime::new().expect("Falha ao criar runtime Tokio"));
     let session = RoomSession::new(data_dir);
@@ -28,8 +32,8 @@ fn main() -> eframe::Result<()> {
     let app_icon = ui::theme::load_window_icon();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(ui::theme::APP_NAME)
-        .with_inner_size([1320.0, 820.0])
-        .with_min_inner_size([920.0, 580.0]);
+        .with_inner_size([1280.0, 780.0])
+        .with_min_inner_size([860.0, 540.0]);
     if let Some(ref icon) = app_icon {
         viewport = viewport.with_icon(icon.clone());
     }
@@ -45,8 +49,12 @@ fn main() -> eframe::Result<()> {
         ui::theme::APP_NAME,
         options,
         Box::new(move |cc| {
-            let initial_theme = session.subscribe().borrow().settings.theme;
-            ui::theme::configure_theme(&cc.egui_ctx, initial_theme);
+            let (initial_theme, initial_custom) = {
+                let rx = session.subscribe();
+                let s = &rx.borrow().settings;
+                (s.theme, s.custom_accent)
+            };
+            ui::theme::configure_theme(&cc.egui_ctx, initial_theme, initial_custom);
             let ctx_for_cb = cc.egui_ctx.clone();
             session.set_repaint_callback(Arc::new(move || {
                 ctx_for_cb.request_repaint();

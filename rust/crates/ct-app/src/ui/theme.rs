@@ -40,17 +40,28 @@ pub const ACCENT_WARN: Color32 = Color32::from_rgb(245, 184, 65);
 
 pub const APP_NAME: &str = "PIT";
 
+pub const CUSTOM_COLOR_PRESETS: &[(&str, [u8; 3])] = &[
+    ("Ciano", [56, 189, 248]),
+    ("Azul", [79, 124, 255]),
+    ("Roxo", [168, 85, 247]),
+    ("Rosa", [244, 63, 148]),
+    ("Laranja", [255, 115, 29]),
+    ("Amarelo", [250, 204, 21]),
+    ("Esmeralda", [34, 229, 138]),
+    ("Branco", [235, 238, 245]),
+];
+
 #[derive(Clone, Copy, Debug)]
 pub struct ThemePalette {
     pub accent: Color32,
     pub accent_bright: Color32,
     pub accent_dim: Color32,
-    /// Cor do texto sobre fundo `accent` (branco no vermelho, preto no verde Marathon).
+    /// Cor do texto sobre fundo `accent` (calculada automaticamente para contraste máximo).
     pub accent_ink: Color32,
 }
 
 impl ThemePalette {
-    pub fn for_theme(theme: ThemeId) -> Self {
+    pub fn for_theme(theme: ThemeId, custom_rgb: [u8; 3]) -> Self {
         match theme {
             ThemeId::Red => Self {
                 accent: RED_ACCENT,
@@ -64,6 +75,37 @@ impl ThemePalette {
                 accent_dim: MARATHON_GREEN_DIM,
                 accent_ink: INK_ON_WHITE,
             },
+            ThemeId::Custom => {
+                let [r, g, b] = custom_rgb;
+                let accent = Color32::from_rgb(r, g, b);
+                let mix = |a: u8, target: u8, t: f32| -> u8 {
+                    (a as f32 + (target as f32 - a as f32) * t)
+                        .round()
+                        .clamp(0.0, 255.0) as u8
+                };
+                let accent_bright = Color32::from_rgb(
+                    mix(r, 255, 0.22),
+                    mix(g, 255, 0.22),
+                    mix(b, 255, 0.22),
+                );
+                let accent_dim = Color32::from_rgb(
+                    mix(17, r, 0.20),
+                    mix(19, g, 0.20),
+                    mix(23, b, 0.20),
+                );
+                let luma = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+                let accent_ink = if luma >= 150.0 {
+                    INK_ON_WHITE
+                } else {
+                    WHITE_PURE
+                };
+                Self {
+                    accent,
+                    accent_bright,
+                    accent_dim,
+                    accent_ink,
+                }
+            }
         }
     }
 }
@@ -85,8 +127,8 @@ pub fn mono_text(text: impl Into<String>, size: f32) -> RichText {
     RichText::new(text.into()).font(FontId::new(size, FontFamily::Monospace))
 }
 
-pub fn configure_theme(ctx: &Context, theme: ThemeId) {
-    let pal = ThemePalette::for_theme(theme);
+pub fn configure_theme(ctx: &Context, theme: ThemeId, custom_rgb: [u8; 3]) {
+    let pal = ThemePalette::for_theme(theme, custom_rgb);
 
     // 1. Fontes embutidas (Space Grotesk + JetBrains Mono)
     let mut fonts = FontDefinitions::default();
@@ -171,8 +213,8 @@ pub fn configure_theme(ctx: &Context, theme: ThemeId) {
     ctx.set_style(style);
 }
 
-pub fn apply_theme_accent(ctx: &Context, theme: ThemeId) {
-    let pal = ThemePalette::for_theme(theme);
+pub fn apply_theme_accent(ctx: &Context, theme: ThemeId, custom_rgb: [u8; 3]) {
+    let pal = ThemePalette::for_theme(theme, custom_rgb);
     ctx.style_mut(|style| {
         style.visuals.selection.bg_fill = pal.accent;
         style.visuals.selection.stroke = Stroke::new(1.0_f32, pal.accent_ink);
