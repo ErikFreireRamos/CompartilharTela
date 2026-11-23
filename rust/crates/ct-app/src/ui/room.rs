@@ -157,8 +157,12 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // Esquerda: Marca PIT + Host
-                draw_logo_badge(ui, app.logo_texture.as_ref(), 26.0, false);
-                ui.add_space(2.0);
+                // Mostra o ícone no topo apenas quando há transmissão ativa
+                // (quando a sala está vazia, o ícone aparece apenas uma vez no centro como marca d'água!)
+                if !snap.streams.is_empty() {
+                    draw_logo_badge(ui, app.logo_texture.as_ref(), 24.0, false);
+                    ui.add_space(2.0);
+                }
                 ui.label(display_text(APP_NAME, 19.0).color(WHITE_PURE));
 
                 // Pequena barra vertical na cor de acento do tema
@@ -219,10 +223,8 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     app.copied_until = Some(Instant::now() + Duration::from_millis(2000));
                 }
 
-                // Direita: Botões flutuantes + avatar PIT
+                // Direita: Botões flutuantes
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    draw_logo_badge(ui, app.logo_texture.as_ref(), 24.0, true);
-
                     let part_label = format!("Participantes ({})", snap.peers.len());
                     if icon_pill_button(
                         ui,
@@ -279,7 +281,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
             bottom: 12,
         }))
         .show(ctx, |ui| {
-            let dock_resp = egui::Frame::NONE
+            egui::Frame::NONE
                 .fill(BG_SURFACE)
                 .stroke(Stroke::new(1.0_f32, BORDER_STRONG))
                 .corner_radius(CornerRadius::same(16))
@@ -492,24 +494,6 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                         });
                     });
                 });
-
-            // Marca PIT centralizada no dock flutuante quando há folga horizontal
-            let dock_rect = dock_resp.response.rect;
-            let show_center_brand = (snap.share.is_none() && dock_rect.width() >= 960.0)
-                || dock_rect.width() >= 1240.0;
-            if show_center_brand {
-                let brand_rect = egui::Rect::from_center_size(dock_rect.center(), vec2(88.0, 26.0));
-                ui.scope_builder(egui::UiBuilder::new().max_rect(brand_rect), |ui| {
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        draw_logo_badge(ui, app.logo_texture.as_ref(), 20.0, false);
-                        ui.label(
-                            display_text(APP_NAME, 15.0)
-                                .color(WHITE_PURE.linear_multiply(0.82)),
-                        );
-                    });
-                });
-            }
         });
 
     // =========================================================================
@@ -1159,7 +1143,6 @@ fn render_stream_tile(
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
-                        draw_logo_badge(ui, app.logo_texture.as_ref(), 16.0, false);
                         draw_status_dot(
                             ui,
                             if stream.is_local {

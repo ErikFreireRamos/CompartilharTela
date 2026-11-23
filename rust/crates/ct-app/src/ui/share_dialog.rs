@@ -8,8 +8,8 @@ use egui::{Align2, Context, CornerRadius, RichText, Stroke, Window, vec2};
 use super::CompartilharApp;
 use super::theme::{
     ACCENT_LIVE, BG_CARD, BG_CONTROL, BG_SURFACE, BORDER_STRONG, BORDER_SUBTLE, INK_ON_WHITE,
-    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, ThemePalette, WHITE_PURE, display_text,
-    draw_logo_badge, mono_text, primary_white_button,
+    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, ThemePalette, WHITE_PURE, display_text, mono_text,
+    primary_white_button,
 };
 
 pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
@@ -38,10 +38,16 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
         (screen.width() - 40.0).clamp(440.0, 560.0)
     };
     let needs_outer_scroll = !two_cols || screen.height() < 490.0;
+
+    // Calcula a altura interna exata da coluna da esquerda para que a coluna de Áudio (direita)
+    // tenha exatamente o mesmo tamanho e a lista de aplicativos ocupe todo o espaço disponível!
+    let has_gpu_picker = app.gpu_adapters.len() > 2;
+    let target_col_inner_h = if has_gpu_picker { 268.0_f32 } else { 236.0_f32 };
     let apps_list_h = if two_cols {
-        (screen.height() - 360.0).clamp(96.0, 196.0)
+        // Espaço restante dentro do card da direita para a lista de aplicativos
+        (target_col_inner_h - 122.0).max(114.0)
     } else {
-        92.0
+        130.0
     };
 
     Window::new("Configurar transmissão")
@@ -59,22 +65,19 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
                 .inner_margin(egui::Margin::same(16)),
         )
         .show(ctx, |ui| {
-            // Linha 1: Cabeçalho limpo com logo PIT
-            ui.horizontal(|ui| {
-                draw_logo_badge(ui, app.logo_texture.as_ref(), 24.0, false);
-                ui.vertical(|ui| {
-                    ui.label(display_text("Preparar compartilhamento", 16.0).color(WHITE_PURE));
-                    ui.label(
-                        RichText::new("Você pode ajustar qualidade e apps ao vivo depois.")
-                            .size(11.5)
-                            .color(TEXT_MUTED),
-                    );
-                });
+            // Linha 1: Cabeçalho limpo (sem repetir o ícone do aplicativo)
+            ui.vertical(|ui| {
+                ui.label(display_text("Preparar compartilhamento", 16.0).color(WHITE_PURE));
+                ui.label(
+                    RichText::new("Você pode ajustar qualidade e apps ao vivo depois.")
+                        .size(11.5)
+                        .color(TEXT_MUTED),
+                );
             });
 
             ui.add_space(8.0);
 
-            // Linha 2 dedicada: Banner Recomendado em largura total (nunca sobrepõe o título!)
+            // Linha 2 dedicada: Banner Recomendado em largura total
             egui::Frame::NONE
                 .fill(BG_CARD)
                 .stroke(Stroke::new(1.0_f32, ACCENT_LIVE.linear_multiply(0.65)))
@@ -126,16 +129,21 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
                         render_audio_col(app, ctx, ui, pal, &apps_snapshot, apps_list_h, &mut draft);
                     });
             } else {
-                // Layout horizontal de 2 colunas: cabe inteiro na janela sem scroll!
+                // Layout horizontal de 2 colunas com a MESMA altura exata!
                 ui.columns(2, |cols| {
-                    egui::Frame::NONE
+                    let left_resp = egui::Frame::NONE
                         .fill(BG_CARD)
                         .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
                         .corner_radius(CornerRadius::same(12))
                         .inner_margin(12.0)
                         .show(&mut cols[0], |ui| {
+                            ui.set_min_height(target_col_inner_h);
                             render_video_col(app, ui, pal, &mut draft);
                         });
+
+                    let left_inner_h =
+                        (left_resp.response.rect.height() - 24.0).max(target_col_inner_h);
+                    let dynamic_apps_h = (left_inner_h - 122.0).max(apps_list_h);
 
                     egui::Frame::NONE
                         .fill(BG_CARD)
@@ -143,13 +151,14 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
                         .corner_radius(CornerRadius::same(12))
                         .inner_margin(12.0)
                         .show(&mut cols[1], |ui| {
+                            ui.set_min_height(left_inner_h);
                             render_audio_col(
                                 app,
                                 ctx,
                                 ui,
                                 pal,
                                 &apps_snapshot,
-                                apps_list_h,
+                                dynamic_apps_h,
                                 &mut draft,
                             );
                         });
@@ -406,6 +415,8 @@ fn render_audio_col(
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(10.0)
                 .show(ui, |ui| {
+                    ui.set_min_height(apps_list_h);
+                    ui.set_width(ui.available_width());
                     ui.label(
                         RichText::new("Carregando lista de aplicativos abertos…")
                             .size(11.5)
@@ -419,9 +430,12 @@ fn render_audio_col(
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
+                    ui.set_min_height(apps_list_h);
+                    ui.set_width(ui.available_width());
                     egui::ScrollArea::vertical()
                         .id_salt("share_dialog_apps_scroll")
                         .max_height(apps_list_h)
+                        .auto_shrink([false, false])
                         .show(ui, |ui| {
                             for app_entry in apps_snapshot {
                                 let mut is_blocked =
