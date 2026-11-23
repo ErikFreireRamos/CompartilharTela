@@ -59,7 +59,7 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
                 .inner_margin(egui::Margin::same(16)),
         )
         .show(ctx, |ui| {
-            // Cabeçalho + banner recomendado compacto na mesma linha em telas largas
+            // Linha 1: Cabeçalho limpo com logo PIT
             ui.horizontal(|ui| {
                 draw_logo_badge(ui, app.logo_texture.as_ref(), 24.0, false);
                 ui.vertical(|ui| {
@@ -70,96 +70,49 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
                             .color(TEXT_MUTED),
                     );
                 });
-
-                if two_cols {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        egui::Frame::NONE
-                            .fill(BG_CARD)
-                            .stroke(Stroke::new(1.0_f32, ACCENT_LIVE.linear_multiply(0.6)))
-                            .corner_radius(CornerRadius::same(10))
-                            .inner_margin(egui::Margin::symmetric(10, 6))
-                            .show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.vertical(|ui| {
-                                        ui.label(
-                                            mono_text("RECOMENDADO", 9.5).color(ACCENT_LIVE),
-                                        );
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} · {} fps · {}",
-                                                RECOMMENDED_RESOLUTION.label(),
-                                                RECOMMENDED_FPS,
-                                                RECOMMENDED_AUDIO_QUALITY.short_label()
-                                            ))
-                                            .size(11.5)
-                                            .color(TEXT_PRIMARY),
-                                        );
-                                    });
-                                    if ui
-                                        .add(
-                                            primary_white_button("Aplicar")
-                                                .min_size(vec2(72.0, 26.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        draft.res = RECOMMENDED_RESOLUTION;
-                                        draft.fps = RECOMMENDED_FPS;
-                                        draft.audio_q = RECOMMENDED_AUDIO_QUALITY;
-                                        app.selected_resolution = draft.res;
-                                        app.selected_fps = draft.fps;
-                                        app.selected_audio_quality = draft.audio_q;
-                                        draft.settings_dirty = true;
-                                    }
-                                });
-                            });
-                    });
-                }
             });
 
-            if !two_cols {
-                ui.add_space(8.0);
-                egui::Frame::NONE
-                    .fill(BG_CARD)
-                    .stroke(Stroke::new(1.0_f32, ACCENT_LIVE.linear_multiply(0.6)))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(12, 7))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                mono_text(
-                                    format!(
-                                        "RECOMENDADO: {} · {} fps · {}",
-                                        RECOMMENDED_RESOLUTION.label(),
-                                        RECOMMENDED_FPS,
-                                        RECOMMENDED_AUDIO_QUALITY.short_label()
-                                    ),
-                                    10.5,
+            ui.add_space(8.0);
+
+            // Linha 2 dedicada: Banner Recomendado em largura total (nunca sobrepõe o título!)
+            egui::Frame::NONE
+                .fill(BG_CARD)
+                .stroke(Stroke::new(1.0_f32, ACCENT_LIVE.linear_multiply(0.65)))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(12, 7))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(mono_text("RECOMENDADO", 10.5).color(ACCENT_LIVE));
+                        ui.label(
+                            RichText::new(format!(
+                                "•  {} · {} fps · {}",
+                                RECOMMENDED_RESOLUTION.label(),
+                                RECOMMENDED_FPS,
+                                RECOMMENDED_AUDIO_QUALITY.label()
+                            ))
+                            .size(12.5)
+                            .color(TEXT_PRIMARY),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add(
+                                    primary_white_button("Usar recomendado")
+                                        .min_size(vec2(134.0, 26.0)),
                                 )
-                                .color(ACCENT_LIVE),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui
-                                        .add(
-                                            primary_white_button("Aplicar")
-                                                .min_size(vec2(72.0, 26.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        draft.res = RECOMMENDED_RESOLUTION;
-                                        draft.fps = RECOMMENDED_FPS;
-                                        draft.audio_q = RECOMMENDED_AUDIO_QUALITY;
-                                        app.selected_resolution = draft.res;
-                                        app.selected_fps = draft.fps;
-                                        app.selected_audio_quality = draft.audio_q;
-                                        draft.settings_dirty = true;
-                                    }
-                                },
-                            );
+                                .clicked()
+                            {
+                                draft.res = RECOMMENDED_RESOLUTION;
+                                draft.fps = RECOMMENDED_FPS;
+                                draft.audio_q = RECOMMENDED_AUDIO_QUALITY;
+                                app.selected_resolution = draft.res;
+                                app.selected_fps = draft.fps;
+                                app.selected_audio_quality = draft.audio_q;
+                                draft.settings_dirty = true;
+                            }
                         });
                     });
-            }
+                });
 
             ui.add_space(10.0);
 
@@ -454,11 +407,9 @@ fn render_audio_col(
                 .inner_margin(10.0)
                 .show(ui, |ui| {
                     ui.label(
-                        RichText::new(
-                            "Discord e Vesktop já ficam silenciados por padrão. Apps tocando som aparecem aqui.",
-                        )
-                        .size(11.5)
-                        .color(TEXT_MUTED),
+                        RichText::new("Carregando lista de aplicativos abertos…")
+                            .size(11.5)
+                            .color(TEXT_MUTED),
                     );
                 });
         } else {
@@ -475,13 +426,12 @@ fn render_audio_col(
                             for app_entry in apps_snapshot {
                                 let mut is_blocked =
                                     d.blocked.iter().any(|b| b == &app_entry.exe);
-                                if ui
-                                    .checkbox(
-                                        &mut is_blocked,
-                                        format!("{} ({})", app_entry.name, app_entry.exe),
-                                    )
-                                    .changed()
-                                {
+                                let label = if app_entry.active {
+                                    format!("{} ({}) — tocando", app_entry.name, app_entry.exe)
+                                } else {
+                                    format!("{} ({})", app_entry.name, app_entry.exe)
+                                };
+                                if ui.checkbox(&mut is_blocked, label).changed() {
                                     if is_blocked {
                                         if !d.blocked.iter().any(|b| b == &app_entry.exe) {
                                             d.blocked.push(app_entry.exe.clone());

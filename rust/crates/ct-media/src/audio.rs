@@ -317,7 +317,7 @@ mod win_audio {
     use std::mem::{ManuallyDrop, size_of};
     use std::time::Instant;
 
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::Foundation::{CloseHandle, LPARAM, WAIT_OBJECT_0};
     use windows::Win32::Media::Audio::{
         AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
@@ -348,7 +348,10 @@ mod win_audio {
         WaitForSingleObject,
     };
     use windows::Win32::System::Variant::VT_BLOB;
-    use windows::core::{HRESULT, Interface, PWSTR, Ref, Result as WinResult, implement};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+    use windows::core::{BOOL, HRESULT, Interface, PWSTR, Ref, Result as WinResult, implement};
 
     #[implement(IActivateAudioInterfaceCompletionHandler, IAgileObject)]
     struct ActivationHandler {
@@ -622,12 +625,82 @@ mod win_audio {
         }
     }
 
+    const SYSTEM_NOISE_EXES: &[&str] = &[
+        "applicationframehost.exe",
+        "CompPkgSrv.exe",
+        "conhost.exe",
+        "csrss.exe",
+        "ctfmon.exe",
+        "dllhost.exe",
+        "dwm.exe",
+        "fontdrvhost.exe",
+        "lsass.exe",
+        "RuntimeBroker.exe",
+        "SearchApp.exe",
+        "SearchHost.exe",
+        "SecurityHealthSystray.exe",
+        "services.exe",
+        "ShellExperienceHost.exe",
+        "sihost.exe",
+        "smartscreen.exe",
+        "smss.exe",
+        "StartMenuExperienceHost.exe",
+        "svchost.exe",
+        "SystemSettings.exe",
+        "taskhostw.exe",
+        "TextInputHost.exe",
+        "Widgets.exe",
+        "wininit.exe",
+        "winlogon.exe",
+    ];
+
+    fn is_system_noise_exe(exe: &str) -> bool {
+        let lower = exe.to_ascii_lowercase();
+        lower == "compartilhador-de-tela.exe"
+            || lower == "explorer.exe"
+            || SYSTEM_NOISE_EXES
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&lower))
+    }
+
+    unsafe extern "system" fn enum_visible_window_proc(
+        hwnd: windows::Win32::Foundation::HWND,
+        lparam: LPARAM,
+    ) -> BOOL {
+        unsafe {
+            if !IsWindowVisible(hwnd).as_bool() {
+                return BOOL(1);
+            }
+            if GetWindowTextLengthW(hwnd) <= 0 {
+                return BOOL(1);
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid != 0 {
+                let set = &mut *(lparam.0 as *mut HashSet<u32>);
+                set.insert(pid);
+            }
+            BOOL(1)
+        }
+    }
+
+    fn enumerate_visible_window_pids() -> HashSet<u32> {
+        let mut pids = HashSet::new();
+        unsafe {
+            let ptr = &mut pids as *mut HashSet<u32>;
+            let _ = EnumWindows(Some(enum_visible_window_proc), LPARAM(ptr as isize));
+        }
+        pids
+    }
+
     pub fn enumerate_audio_apps_win(blocked: &HashSet<String>) -> Vec<AudioApp> {
         let mut apps: BTreeMap<String, AudioApp> = BTreeMap::new();
         let self_pid = std::process::id();
         unsafe {
             let com = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
             let procs = snapshot_processes();
+
+            // 1. Todas as sessões de áudio registradas no Windows (ativas ou silenciosas)
             for s in enumerate_audio_sessions() {
                 if s.pid == self_pid {
                     continue;
@@ -637,7 +710,7 @@ mod win_audio {
                     .map(|p| p.exe.clone())
                     .or_else(|| query_exe_name(s.pid))
                     .unwrap_or_default();
-                if exe.is_empty() {
+                if exe.is_empty() || exe == "compartilhador-de-tela.exe" {
                     continue;
                 }
                 let display = exe.strip_suffix(".exe").unwrap_or(&exe).to_string();
@@ -651,11 +724,59 @@ mod win_audio {
                 entry.active = entry.active || s.active;
                 entry.blocked = entry.blocked || is_blocked;
             }
+
+            // 2. Todos os aplicativos abertos com janela visível (mesmo que não estejam produzindo som)
+            for pid in enumerate_visible_window_pids() {
+                if pid == self_pid {
+                    continue;
+                }
+                let exe = procs
+                    .get(&pid)
+                    .map(|p| p.exe.clone())
+                    .or_else(|| query_exe_name(pid))
+                    .unwrap_or_default();
+                if exe.is_empty() || is_system_noise_exe(&exe) {
+                    continue;
+                }
+                let display = exe.strip_suffix(".exe").unwrap_or(&exe).to_string();
+                let is_blocked = blocked.contains(&exe);
+                let entry = apps.entry(exe.clone()).or_insert(AudioApp {
+                    exe,
+                    name: display,
+                    active: false,
+                    blocked: is_blocked,
+                });
+                entry.blocked = entry.blocked || is_blocked;
+            }
+
+            // 3. Apps já marcados como bloqueados pelo usuário ou por padrão (Discord/Vesktop etc.)
+            for b_exe in blocked {
+                let exe = b_exe.trim().to_ascii_lowercase();
+                if exe.is_empty() {
+                    continue;
+                }
+                let display = exe.strip_suffix(".exe").unwrap_or(&exe).to_string();
+                apps.entry(exe.clone()).or_insert(AudioApp {
+                    exe,
+                    name: display,
+                    active: false,
+                    blocked: true,
+                });
+            }
+
             if com {
                 CoUninitialize();
             }
         }
-        apps.into_values().collect()
+
+        let mut list: Vec<AudioApp> = apps.into_values().collect();
+        // Ordena: tocando som primeiro, depois apps abertos/bloqueados em ordem alfabética
+        list.sort_by(|a, b| {
+            b.active
+                .cmp(&a.active)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        list
     }
 
     struct ProcessCaptureHandle {

@@ -2,7 +2,7 @@ use ct_core::settings::ThemeId;
 use ct_media::p2p::is_iroh_ticket;
 use ct_media::session::Phase;
 use egui::{
-    Align, Align2, Color32, Context, CornerRadius, Layout, Order, RichText, Stroke, pos2, vec2,
+    Align, Color32, Context, CornerRadius, Layout, Order, RichText, Stroke, pos2, vec2,
 };
 
 use super::CompartilharApp;
@@ -407,8 +407,14 @@ fn render_custom_color_popover(app: &mut CompartilharApp, ctx: &Context) {
     let mut changed = false;
     let mut persist_now = false;
 
+    // Ancora pela borda ESQUERDA fixa (LEFT_TOP) para que nenhuma variação de 1px
+    // nos widgets internos faça o card tremer horizontalmente durante o arraste!
+    let popup_w = 292.0_f32;
+    let screen_r = ctx.screen_rect();
+    let fixed_x = (screen_r.right() - popup_w - 36.0).max(16.0);
+
     egui::Area::new(egui::Id::new("custom_rgb_picker"))
-        .anchor(Align2::RIGHT_TOP, vec2(-16.0, 52.0))
+        .fixed_pos(pos2(fixed_x, 52.0))
         .order(Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::NONE
@@ -418,26 +424,38 @@ fn render_custom_color_popover(app: &mut CompartilharApp, ctx: &Context) {
                 .shadow(floating_card_shadow())
                 .inner_margin(egui::Margin::same(14))
                 .show(ui, |ui| {
-                    ui.set_width(276.0);
+                    ui.set_min_width(popup_w);
+                    ui.set_max_width(popup_w);
 
-                    // Cabeçalho com código HEX e botão fechar
+                    // Cabeçalho com amostra de cor, código HEX em caixa de largura fixa e botão Fechar
                     ui.horizontal(|ui| {
+                        let (sw_rect, _) =
+                            ui.allocate_exact_size(vec2(18.0, 18.0), egui::Sense::hover());
+                        ui.painter().rect(
+                            sw_rect,
+                            CornerRadius::same(5),
+                            color,
+                            Stroke::new(1.0_f32, WHITE_PURE),
+                            egui::StrokeKind::Inside,
+                        );
                         ui.label(display_text("Cor personalizada", 14.0).color(WHITE_PURE));
-                        egui::Frame::NONE
-                            .fill(BG_CARD)
-                            .corner_radius(CornerRadius::same(6))
-                            .inner_margin(egui::Margin::symmetric(6, 2))
-                            .show(ui, |ui| {
-                                ui.label(
-                                    mono_text(format!("#{r:02X}{g:02X}{b:02X}"), 11.0)
-                                        .color(color),
-                                );
-                            });
+
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.small_button("Fechar").clicked() {
                                 open = false;
                                 persist_now = true;
                             }
+                            egui::Frame::NONE
+                                .fill(BG_CARD)
+                                .corner_radius(CornerRadius::same(6))
+                                .inner_margin(egui::Margin::symmetric(6, 2))
+                                .show(ui, |ui| {
+                                    ui.set_min_width(58.0);
+                                    ui.label(
+                                        mono_text(format!("#{r:02X}{g:02X}{b:02X}"), 11.0)
+                                            .color(WHITE_PURE),
+                                    );
+                                });
                         });
                     });
 
@@ -446,13 +464,13 @@ fn render_custom_color_popover(app: &mut CompartilharApp, ctx: &Context) {
                     ui.add_space(4.0);
 
                     // 8 presets rápidos em 1 clique
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 7.0;
                         for &(preset_name, rgb) in CUSTOM_COLOR_PRESETS {
                             let sw = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
                             let selected = app.custom_accent == rgb;
                             let (rect, resp) =
-                                ui.allocate_exact_size(vec2(26.0, 26.0), egui::Sense::click());
+                                ui.allocate_exact_size(vec2(28.0, 26.0), egui::Sense::click());
                             ui.painter().rect(
                                 rect,
                                 CornerRadius::same(7),
@@ -478,13 +496,14 @@ fn render_custom_color_popover(app: &mut CompartilharApp, ctx: &Context) {
                     ui.separator();
                     ui.add_space(8.0);
 
-                    // Sliders RGB diretos e fáceis de usar
+                    // Sliders RGB com largura travada (zero tremor ao arrastar a bolinha!)
                     ui.label(
-                        RichText::new("Ajuste RGB fino:")
+                        RichText::new("Ajuste RGB (arraste as bolinhas):")
                             .size(11.5)
                             .color(TEXT_MUTED),
                     );
                     ui.add_space(4.0);
+                    ui.spacing_mut().slider_width = 198.0;
 
                     if rgb_slider_row(ui, "R", Color32::from_rgb(255, 92, 92), &mut r) {
                         color = Color32::from_rgb(r, g, b);
@@ -496,19 +515,6 @@ fn render_custom_color_popover(app: &mut CompartilharApp, ctx: &Context) {
                     }
                     if rgb_slider_row(ui, "B", Color32::from_rgb(96, 165, 255), &mut b) {
                         color = Color32::from_rgb(r, g, b);
-                        changed = true;
-                    }
-
-                    ui.add_space(8.0);
-                    // Seletor visual de matiz/saturação integrado do egui
-                    if egui::color_picker::color_picker_color32(
-                        ui,
-                        &mut color,
-                        egui::color_picker::Alpha::Opaque,
-                    ) {
-                        r = color.r();
-                        g = color.g();
-                        b = color.b();
                         changed = true;
                     }
                 });

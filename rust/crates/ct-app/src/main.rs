@@ -29,17 +29,28 @@ fn main() -> eframe::Result<()> {
     let rt = Arc::new(Runtime::new().expect("Falha ao criar runtime Tokio"));
     let session = RoomSession::new(data_dir);
 
+    let win_w = 1280.0_f32;
+    let win_h = 780.0_f32;
     let app_icon = ui::theme::load_window_icon();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(ui::theme::APP_NAME)
-        .with_inner_size([1280.0, 780.0])
+        .with_inner_size([win_w, win_h])
         .with_min_inner_size([860.0, 540.0]);
+
+    // Centraliza no monitor principal logo ao abrir
+    if let Some(primary) = session.list_screen_sources().first() {
+        let cx = primary.left as f32 + ((primary.width as f32 - win_w) * 0.5).max(0.0);
+        let cy = primary.top as f32 + ((primary.height as f32 - win_h) * 0.45).max(0.0);
+        viewport = viewport.with_position(egui::pos2(cx, cy));
+    }
+
     if let Some(ref icon) = app_icon {
         viewport = viewport.with_icon(icon.clone());
     }
 
     let options = eframe::NativeOptions {
         viewport,
+        centered: true,
         vsync: true,
         multisampling: 0,
         ..Default::default()
