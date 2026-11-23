@@ -25,26 +25,37 @@ fn main() -> eframe::Result<()> {
     let rt = Arc::new(Runtime::new().expect("Falha ao criar runtime Tokio"));
     let session = RoomSession::new(data_dir);
 
+    let app_icon = ui::theme::load_window_icon();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(ui::theme::APP_NAME)
+        .with_inner_size([1320.0, 820.0])
+        .with_min_inner_size([920.0, 580.0]);
+    if let Some(ref icon) = app_icon {
+        viewport = viewport.with_icon(icon.clone());
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("CompartilhadorDeTela")
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([920.0, 580.0]),
+        viewport,
         vsync: true,
         multisampling: 0,
         ..Default::default()
     };
 
     eframe::run_native(
-        "CompartilhadorDeTela",
+        ui::theme::APP_NAME,
         options,
         Box::new(move |cc| {
-            ui::configure_theme(&cc.egui_ctx);
+            ui::theme::configure_theme(&cc.egui_ctx);
             let ctx_for_cb = cc.egui_ctx.clone();
             session.set_repaint_callback(Arc::new(move || {
                 ctx_for_cb.request_repaint();
             }));
-            Ok(Box::new(ui::CompartilharApp::new(rt, session)))
+            Ok(Box::new(ui::CompartilharApp::new(
+                &cc.egui_ctx,
+                rt,
+                session,
+                app_icon,
+            )))
         }),
     )
 }

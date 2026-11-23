@@ -662,6 +662,7 @@ dependencies = [
  "ct-media",
  "eframe",
  "egui",
+ "image",
  "tokio",
  "tracing",
  "tracing-subscriber",
