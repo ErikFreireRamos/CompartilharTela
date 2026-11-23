@@ -21,6 +21,14 @@ fn default_fps() -> u32 {
     RECOMMENDED_FPS
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThemeId {
+    #[default]
+    Red,
+    MarathonGreen,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -35,6 +43,8 @@ pub struct Settings {
     pub audio_quality: AudioQualityId,
     #[serde(default)]
     pub gpu_adapter_index: Option<u32>,
+    #[serde(default)]
+    pub theme: ThemeId,
     pub content_type: ContentType,
     pub share_audio: bool,
     pub send_volume: f32,
@@ -51,6 +61,7 @@ impl Default for Settings {
             fps: RECOMMENDED_FPS,
             audio_quality: RECOMMENDED_AUDIO_QUALITY,
             gpu_adapter_index: None,
+            theme: ThemeId::Red,
             content_type: ContentType::Motion,
             share_audio: true,
             send_volume: 1.0,

@@ -45,7 +45,8 @@ fn main() -> eframe::Result<()> {
         ui::theme::APP_NAME,
         options,
         Box::new(move |cc| {
-            ui::theme::configure_theme(&cc.egui_ctx);
+            let initial_theme = session.subscribe().borrow().settings.theme;
+            ui::theme::configure_theme(&cc.egui_ctx, initial_theme);
             let ctx_for_cb = cc.egui_ctx.clone();
             session.set_repaint_callback(Arc::new(move || {
                 ctx_for_cb.request_repaint();

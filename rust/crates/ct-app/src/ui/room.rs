@@ -9,15 +9,16 @@ use egui::{
 };
 
 use super::theme::{
-    ACCENT_LIVE, ACCENT_RED, ACCENT_RED_BRIGHT, ACCENT_RED_DIM, ACCENT_WARN, APP_NAME, BG_CARD,
-    BG_CONTROL, BG_OVERLAY, BG_SURFACE, BG_VOID, BORDER_STRONG, BORDER_SUBTLE, IconKind,
-    PillVariant, TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, WHITE_PURE, display_text,
-    draw_logo_badge, draw_status_dot, floating_card_shadow, icon_pill_button, mono_text,
-    paint_icon, primary_white_button, render_admin_warning,
+    ACCENT_LIVE, ACCENT_WARN, APP_NAME, BG_CARD, BG_CONTROL, BG_OVERLAY, BG_SURFACE, BG_VOID,
+    BORDER_STRONG, BORDER_SUBTLE, INK_ON_WHITE, IconKind, PillVariant, TEXT_MUTED, TEXT_PRIMARY,
+    TEXT_SECONDARY, ThemePalette, WHITE_PURE, display_text, draw_logo_badge, draw_status_dot,
+    floating_card_shadow, icon_pill_button, mono_text, paint_icon, paint_logo_watermark,
+    primary_white_button, render_admin_warning,
 };
 use super::{CompartilharApp, share_dialog};
 
 pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
+    let pal = app.palette();
     let snap = app.snap.clone();
     let copied = app
         .copied_until
@@ -75,7 +76,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             draw_logo_badge(ui, app.logo_texture.as_ref(), 18.0, false);
-                            draw_status_dot(ui, ACCENT_RED, 4.0);
+                            draw_status_dot(ui, pal.accent_bright, 4.0);
                             let title = if stream.is_local {
                                 "Você".to_string()
                             } else {
@@ -125,6 +126,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                 IconKind::ExitFullscreen,
                                 Some("Sair (Esc)"),
                                 PillVariant::ActiveWhite,
+                                pal,
                                 28.0,
                             )
                             .clicked()
@@ -138,24 +140,20 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
         if exit_fs {
             app.exit_main_fullscreen(ctx);
         }
-        render_popout_windows(app, ctx, &snap);
+        render_popout_windows(app, ctx, &snap, pal);
         return;
     }
 
     // =========================================================================
-    // Barra Superior minimalista (logo PIT + convite central + botões flutuantes à direita)
+    // Barra Superior minimalista (logo PIT + convite + botões flutuantes à direita)
     // =========================================================================
     egui::TopBottomPanel::top("room_header")
-        .frame(
-            egui::Frame::NONE
-                .fill(BG_VOID)
-                .inner_margin(egui::Margin {
-                    left: 14,
-                    right: 14,
-                    top: 10,
-                    bottom: 6,
-                }),
-        )
+        .frame(egui::Frame::NONE.fill(BG_VOID).inner_margin(egui::Margin {
+            left: 14,
+            right: 14,
+            top: 10,
+            bottom: 6,
+        }))
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // Esquerda: Marca PIT + Host
@@ -163,9 +161,9 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                 ui.add_space(2.0);
                 ui.label(display_text(APP_NAME, 19.0).color(WHITE_PURE));
 
-                // Pequena barra vertical vermelha tática
+                // Pequena barra vertical na cor de acento do tema
                 let (bar_r, _) = ui.allocate_exact_size(vec2(2.0, 18.0), egui::Sense::hover());
-                ui.painter().rect_filled(bar_r, 1.0, ACCENT_RED);
+                ui.painter().rect_filled(bar_r, 1.0, pal.accent);
 
                 let host_name = snap
                     .meta
@@ -187,7 +185,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
 
                 ui.add_space(8.0);
 
-                // Pílula de convite clicável (super intuitiva para usuários leigos)
+                // Pílula de convite clicável
                 let full_code = snap.code();
                 let short_code = if full_code.len() > 16 {
                     format!("{}…", &full_code[..14])
@@ -212,6 +210,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     } else {
                         PillVariant::Dark
                     },
+                    pal,
                     32.0,
                 )
                 .on_hover_text("Clique para copiar o código da sala e enviar para seus amigos");
@@ -220,12 +219,10 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     app.copied_until = Some(Instant::now() + Duration::from_millis(2000));
                 }
 
-                // Direita: Botões flutuantes estilo print de referência + avatar PIT
+                // Direita: Botões flutuantes + avatar PIT
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // Avatar/logo redondo no canto superior direito
                     draw_logo_badge(ui, app.logo_texture.as_ref(), 24.0, true);
 
-                    // Botão Participantes (mostra ou minimiza a aba lateral direita)
                     let part_label = format!("Participantes ({})", snap.peers.len());
                     if icon_pill_button(
                         ui,
@@ -236,6 +233,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                         } else {
                             PillVariant::Dark
                         },
+                        pal,
                         32.0,
                     )
                     .on_hover_text("Mostrar ou ocultar o painel de participantes")
@@ -244,7 +242,6 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                         app.show_participants = !app.show_participants;
                     }
 
-                    // Atalho rápido de Apps Bloqueados quando está transmitindo áudio nativo
                     if snap
                         .share
                         .as_ref()
@@ -258,6 +255,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                             } else {
                                 PillVariant::Dark
                             },
+                            pal,
                             32.0,
                         )
                         .on_hover_text("Escolher quais apps não devem ter o som transmitido")
@@ -274,16 +272,12 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     // Dock Flutuante Inferior (controles ao vivo + marca PIT + Destaque/Grade + Parar/Sair)
     // =========================================================================
     egui::TopBottomPanel::bottom("room_floating_dock")
-        .frame(
-            egui::Frame::NONE
-                .fill(BG_VOID)
-                .inner_margin(egui::Margin {
-                    left: 14,
-                    right: 14,
-                    top: 6,
-                    bottom: 12,
-                }),
-        )
+        .frame(egui::Frame::NONE.fill(BG_VOID).inner_margin(egui::Margin {
+            left: 14,
+            right: 14,
+            top: 6,
+            bottom: 12,
+        }))
         .show(ctx, |ui| {
             let dock_resp = egui::Frame::NONE
                 .fill(BG_SURFACE)
@@ -295,16 +289,15 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     ui.horizontal_wrapped(|ui| {
                         // Lado esquerdo: Controles de transmissão (ou botão grande Compartilhar tela)
                         if let Some(ref share) = snap.share {
-                            // Badge AO VIVO em vermelho tático
                             egui::Frame::NONE
-                                .fill(ACCENT_RED_DIM)
-                                .stroke(Stroke::new(1.0_f32, ACCENT_RED))
+                                .fill(pal.accent_dim)
+                                .stroke(Stroke::new(1.0_f32, pal.accent))
                                 .corner_radius(CornerRadius::same(8))
                                 .inner_margin(egui::Margin::symmetric(9, 5))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
                                         ui.spacing_mut().item_spacing.x = 6.0;
-                                        draw_status_dot(ui, ACCENT_RED_BRIGHT, 3.8);
+                                        draw_status_dot(ui, pal.accent_bright, 3.8);
                                         ui.label(
                                             mono_text("AO VIVO", 11.0).color(WHITE_PURE),
                                         );
@@ -404,12 +397,12 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                 );
                             }
                         } else {
-                            // Não está transmitindo: botão branco WSTR de alto contraste
                             if icon_pill_button(
                                 ui,
                                 IconKind::Screen,
                                 Some("Compartilhar tela"),
                                 PillVariant::ActiveWhite,
+                                pal,
                                 36.0,
                             )
                             .clicked()
@@ -430,7 +423,8 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                 ui,
                                 IconKind::Leave,
                                 Some("Sair"),
-                                PillVariant::GhostDanger,
+                                PillVariant::GhostAccent,
+                                pal,
                                 34.0,
                             )
                             .on_hover_text("Sair da sala (se você for o host, outra pessoa assume)")
@@ -447,7 +441,8 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                     ui,
                                     IconKind::Stop,
                                     Some("Parar"),
-                                    PillVariant::TacticalRed,
+                                    PillVariant::TacticalAccent,
+                                    pal,
                                     34.0,
                                 )
                                 .on_hover_text("Encerrar sua transmissão de tela")
@@ -457,7 +452,6 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                 app.rt.spawn(async move { session.stop_share().await });
                             }
 
-                            // Alternador segmentado Destaque / Grade
                             if !snap.streams.is_empty() {
                                 if icon_pill_button(
                                     ui,
@@ -468,6 +462,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                     } else {
                                         PillVariant::Dark
                                     },
+                                    pal,
                                     34.0,
                                 )
                                 .on_hover_text("Ver todas as telas lado a lado")
@@ -485,6 +480,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                     } else {
                                         PillVariant::Dark
                                     },
+                                    pal,
                                     34.0,
                                 )
                                 .on_hover_text("Focar uma tela grande com miniaturas embaixo")
@@ -497,7 +493,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     });
                 });
 
-            // Marca PIT centralizada no dock flutuante (estilo print de referência) quando há folga horizontal
+            // Marca PIT centralizada no dock flutuante quando há folga horizontal
             let dock_rect = dock_resp.response.rect;
             let show_center_brand = (snap.share.is_none() && dock_rect.width() >= 960.0)
                 || dock_rect.width() >= 1240.0;
@@ -521,17 +517,15 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     // =========================================================================
     if app.show_participants {
         egui::SidePanel::right("participants")
-            .min_width(252.0)
-            .default_width(268.0)
+            .min_width(256.0)
+            .default_width(272.0)
             .resizable(false)
-            .frame(
-                egui::Frame::NONE.fill(BG_VOID).inner_margin(egui::Margin {
-                    left: 4,
-                    right: 14,
-                    top: 6,
-                    bottom: 6,
-                }),
-            )
+            .frame(egui::Frame::NONE.fill(BG_VOID).inner_margin(egui::Margin {
+                left: 4,
+                right: 14,
+                top: 6,
+                bottom: 6,
+            }))
             .show(ctx, |ui| {
                 egui::Frame::NONE
                     .fill(BG_SURFACE)
@@ -546,7 +540,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                         ui.horizontal(|ui| {
                             let (bar_r, _) =
                                 ui.allocate_exact_size(vec2(3.0, 16.0), egui::Sense::hover());
-                            ui.painter().rect_filled(bar_r, 1.5, ACCENT_RED);
+                            ui.painter().rect_filled(bar_r, 1.5, pal.accent);
 
                             ui.label(display_text("Participantes", 15.0).color(WHITE_PURE));
                             egui::Frame::NONE
@@ -566,6 +560,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                     IconKind::ChevronRight,
                                     None,
                                     PillVariant::Dark,
+                                    pal,
                                     26.0,
                                 )
                                 .on_hover_text("Minimizar painel de participantes")
@@ -587,7 +582,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                         .stroke(Stroke::new(
                                             1.0_f32,
                                             if p.sharing {
-                                                ACCENT_RED.linear_multiply(0.55)
+                                                pal.accent.linear_multiply(0.55)
                                             } else {
                                                 BORDER_SUBTLE
                                             },
@@ -595,48 +590,50 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                         .corner_radius(CornerRadius::same(12))
                                         .inner_margin(egui::Margin::symmetric(10, 9))
                                         .show(ui, |ui| {
+                                            ui.set_width(ui.available_width());
+
+                                            // Linha 1: Avatar + Nome truncado + papel (Host/Reserva)
                                             ui.horizontal(|ui| {
-                                                draw_peer_avatar(ui, &p.name, p.sharing);
+                                                draw_peer_avatar(ui, &p.name, p.sharing, pal);
                                                 ui.vertical(|ui| {
-                                                    ui.horizontal(|ui| {
-                                                        let suffix =
-                                                            if p.is_local { " (você)" } else { "" };
-                                                        ui.label(
+                                                    let suffix =
+                                                        if p.is_local { " (você)" } else { "" };
+                                                    ui.add(
+                                                        egui::Label::new(
                                                             display_text(
                                                                 format!("{}{suffix}", p.name),
                                                                 13.5,
                                                             )
                                                             .color(WHITE_PURE),
-                                                        );
-                                                    });
+                                                        )
+                                                        .truncate(),
+                                                    );
                                                     ui.horizontal(|ui| {
                                                         if p.is_host {
                                                             role_pill(ui, "HOST", ACCENT_WARN);
                                                         } else if p.can_host == Some(true) {
                                                             role_pill(ui, "RESERVA", TEXT_MUTED);
                                                         }
-                                                        if p.sharing {
-                                                            role_pill(
-                                                                ui,
-                                                                "AO VIVO",
-                                                                ACCENT_RED_BRIGHT,
-                                                            );
-                                                        }
                                                     });
                                                 });
+                                            });
 
-                                                if p.sharing {
+                                            // Linha 2 dedicada quando está transmitindo (nunca sobrepõe o nome!)
+                                            if p.sharing {
+                                                ui.add_space(6.0);
+                                                ui.horizontal(|ui| {
+                                                    role_pill(ui, "AO VIVO", pal.accent_bright);
                                                     ui.with_layout(
                                                         Layout::right_to_left(Align::Center),
                                                         |ui| {
                                                             let btn = egui::Button::new(
-                                                                display_text("Ver", 11.5)
-                                                                    .color(Color32::BLACK),
+                                                                display_text("Ver tela", 11.5)
+                                                                    .color(INK_ON_WHITE),
                                                             )
                                                             .fill(WHITE_PURE)
                                                             .stroke(Stroke::NONE)
                                                             .corner_radius(CornerRadius::same(7))
-                                                            .min_size(vec2(42.0, 24.0));
+                                                            .min_size(vec2(68.0, 24.0));
                                                             if ui.add(btn).clicked() {
                                                                 app.focused_id =
                                                                     Some(p.identity.clone());
@@ -644,8 +641,8 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                                             }
                                                         },
                                                     );
-                                                }
-                                            });
+                                                });
+                                            }
                                         });
                                     ui.add_space(7.0);
                                 }
@@ -655,7 +652,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     }
 
     // =========================================================================
-    // Palco Principal de Vídeo (Destaque ou Grade com cantos arredondados e overlays)
+    // Palco Principal de Vídeo
     // =========================================================================
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(BG_VOID).inner_margin(egui::Margin {
@@ -697,64 +694,68 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                 .collect();
 
             if snap.streams.is_empty() {
-                // Estado vazio amigável com logo PIT em destaque
-                ui.centered_and_justified(|ui| {
-                    egui::Frame::NONE
-                        .fill(BG_SURFACE)
-                        .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
-                        .corner_radius(CornerRadius::same(18))
-                        .shadow(floating_card_shadow())
-                        .inner_margin(egui::Margin::same(32))
-                        .show(ui, |ui| {
-                            ui.set_max_width(430.0);
-                            ui.vertical_centered(|ui| {
-                                draw_logo_badge(ui, app.logo_texture.as_ref(), 62.0, true);
-                                ui.add_space(14.0);
-                                ui.label(
-                                    display_text("Sala pronta para transmitir", 21.0)
-                                        .color(WHITE_PURE),
-                                );
-                                ui.add_space(6.0);
-                                ui.label(
-                                    RichText::new(
-                                        "Ninguém está compartilhando a tela ainda. Inicie sua transmissão ou envie o convite para seus amigos.",
-                                    )
-                                    .size(13.5)
-                                    .color(TEXT_SECONDARY),
-                                );
-                                ui.add_space(20.0);
-                                ui.horizontal(|ui| {
-                                    let pad = ((ui.available_width() - 340.0) * 0.5).max(0.0);
-                                    ui.add_space(pad);
-                                    if ui
-                                        .add(
-                                            primary_white_button("Compartilhar minha tela")
-                                                .min_size(vec2(196.0, 40.0)),
-                                        )
-                                        .clicked()
-                                    {
-                                        app.open_share_dialog(ctx);
-                                    }
-                                    if icon_pill_button(
-                                        ui,
-                                        if copied {
-                                            IconKind::Check
-                                        } else {
-                                            IconKind::Copy
-                                        },
-                                        Some(if copied { "Copiado!" } else { "Convite" }),
-                                        PillVariant::Dark,
-                                        40.0,
-                                    )
-                                    .clicked()
-                                    {
-                                        ctx.copy_text(snap.code().to_string());
-                                        app.copied_until =
-                                            Some(Instant::now() + Duration::from_millis(2000));
-                                    }
-                                });
-                            });
+                // Palco vazio reformulado: ícone PIT grande em baixa opacidade no fundo
+                let stage_rect = ui.available_rect_before_wrap();
+                ui.painter().rect(
+                    stage_rect,
+                    CornerRadius::same(16),
+                    Color32::from_rgb(12, 13, 17),
+                    Stroke::new(1.0_f32, BORDER_SUBTLE),
+                    egui::StrokeKind::Inside,
+                );
+                paint_logo_watermark(ui.painter(), stage_rect, app.logo_texture.as_ref(), 30);
+
+                // Conteúdo limpo e flutuante por cima da marca d'água
+                let content_w = 440.0_f32.min((stage_rect.width() - 40.0).max(260.0));
+                let content_rect =
+                    egui::Rect::from_center_size(stage_rect.center(), vec2(content_w, 160.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            display_text("Sala pronta para transmitir", 24.0).color(WHITE_PURE),
+                        );
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(
+                                "Ninguém está compartilhando a tela ainda.\nInicie sua transmissão ou copie o convite para chamar seus amigos.",
+                            )
+                            .size(14.0)
+                            .color(TEXT_SECONDARY),
+                        );
+                        ui.add_space(22.0);
+                        ui.horizontal(|ui| {
+                            let buttons_w = 316.0;
+                            let pad = ((ui.available_width() - buttons_w) * 0.5).max(0.0);
+                            ui.add_space(pad);
+                            if ui
+                                .add(
+                                    primary_white_button("Compartilhar minha tela")
+                                        .min_size(vec2(198.0, 40.0)),
+                                )
+                                .clicked()
+                            {
+                                app.open_share_dialog(ctx);
+                            }
+                            if icon_pill_button(
+                                ui,
+                                if copied {
+                                    IconKind::Check
+                                } else {
+                                    IconKind::Copy
+                                },
+                                Some(if copied { "Copiado!" } else { "Convite" }),
+                                PillVariant::Overlay,
+                                pal,
+                                40.0,
+                            )
+                            .clicked()
+                            {
+                                ctx.copy_text(snap.code().to_string());
+                                app.copied_until =
+                                    Some(Instant::now() + Duration::from_millis(2000));
+                            }
                         });
+                    });
                 });
             } else if docked_streams.is_empty() {
                 ui.centered_and_justified(|ui| {
@@ -786,7 +787,6 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                         });
                 });
             } else if app.grid_mode {
-                // Layout Grade (inspirado diretamente na print 2x2!)
                 let count = docked_streams.len();
                 let cols = if count <= 1 {
                     1
@@ -810,7 +810,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                             for stream in row_chunk {
                                 ui.allocate_ui(vec2(cell_w, cell_h), |ui| {
                                     render_stream_tile(
-                                        app, ctx, ui, &snap, stream, true, false, false,
+                                        app, ctx, ui, &snap, stream, pal, true, false, false,
                                     );
                                 });
                             }
@@ -819,7 +819,6 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                     }
                 });
             } else {
-                // Layout Destaque (tela principal grande + faixa horizontal de miniaturas clicáveis)
                 let focused_id = app
                     .focused_id
                     .clone()
@@ -850,7 +849,17 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                         .max(220.0);
 
                 ui.allocate_ui(vec2(avail.x, hero_h), |ui| {
-                    render_stream_tile(app, ctx, ui, &snap, focused_stream, true, false, false);
+                    render_stream_tile(
+                        app,
+                        ctx,
+                        ui,
+                        &snap,
+                        focused_stream,
+                        pal,
+                        true,
+                        false,
+                        false,
+                    );
                 });
 
                 if !others.is_empty() {
@@ -863,7 +872,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                                 for stream in others {
                                     ui.allocate_ui(vec2(258.0, thumb_strip_h - 6.0), |ui| {
                                         render_stream_tile(
-                                            app, ctx, ui, &snap, stream, false, false, false,
+                                            app, ctx, ui, &snap, stream, pal, false, false, false,
                                         );
                                     });
                                 }
@@ -876,7 +885,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     // =========================================================================
     // Janelas Separadas (Pop-out nativos com ícone PIT e Tela Cheia!)
     // =========================================================================
-    render_popout_windows(app, ctx, &snap);
+    render_popout_windows(app, ctx, &snap, pal);
 
     // =========================================================================
     // Janela flutuante de Apps Silenciados (ao vivo)
@@ -889,6 +898,8 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
 
         egui::Window::new("Apps silenciados (ao vivo)")
             .open(&mut open)
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .constrain(true)
             .collapsible(false)
             .resizable(false)
             .min_width(370.0)
@@ -924,7 +935,7 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
                         .corner_radius(CornerRadius::same(10))
                         .inner_margin(8.0)
                         .show(ui, |ui| {
-                            egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
                                 for entry in &apps_snapshot {
                                     let mut is_blocked =
                                         blocked.iter().any(|b| b == &entry.exe);
@@ -963,7 +974,12 @@ pub fn render_room(app: &mut CompartilharApp, ctx: &Context) {
     }
 }
 
-fn render_popout_windows(app: &mut CompartilharApp, ctx: &Context, snap: &SessionSnapshot) {
+fn render_popout_windows(
+    app: &mut CompartilharApp,
+    ctx: &Context,
+    snap: &SessionSnapshot,
+    pal: ThemePalette,
+) {
     let popped_ids: Vec<String> = app.popped_out.iter().cloned().collect();
     let mut to_dock_back = Vec::new();
 
@@ -1003,7 +1019,7 @@ fn render_popout_windows(app: &mut CompartilharApp, ctx: &Context, snap: &Sessio
                 })
                 .show(vp_ctx, |ui| {
                     let action =
-                        render_stream_tile(app, vp_ctx, ui, snap, stream, true, true, is_fs);
+                        render_stream_tile(app, vp_ctx, ui, snap, stream, pal, true, true, is_fs);
                     if action.dock_back {
                         to_dock_back.push(id.clone());
                     }
@@ -1044,6 +1060,7 @@ fn render_stream_tile(
     ui: &mut egui::Ui,
     snap: &SessionSnapshot,
     stream: &StreamView,
+    pal: ThemePalette,
     large: bool,
     in_popout: bool,
     popout_is_fs: bool,
@@ -1074,7 +1091,6 @@ fn render_stream_tile(
     frame.show(ui, |ui| {
         let tile_rect = ui.available_rect_before_wrap();
 
-        // 1. Vídeo ocupando todo o espaço do tile (limpo, igual à print de referência!)
         let avail = ui.available_size();
         let tex_info = app
             .textures
@@ -1129,7 +1145,7 @@ fn render_stream_tile(
             });
         }
 
-        // 2. Pílula flutuante superior esquerda (Logo PIT + ponto ao vivo + nome)
+        // Pílula flutuante superior esquerda (Logo PIT + ponto ao vivo + nome)
         let top_left_rect = egui::Rect::from_min_size(
             pos2(tile_rect.left() + 10.0, tile_rect.top() + 10.0),
             vec2((tile_rect.width() * 0.45).max(110.0), 32.0),
@@ -1149,7 +1165,7 @@ fn render_stream_tile(
                             if stream.is_local {
                                 ACCENT_LIVE
                             } else {
-                                ACCENT_RED_BRIGHT
+                                pal.accent_bright
                             },
                             3.5,
                         );
@@ -1163,7 +1179,7 @@ fn render_stream_tile(
                 });
         });
 
-        // 3. Barra de controles flutuante no canto superior direito do vídeo
+        // Barra de controles flutuante no canto superior direito do vídeo
         let controls_w = (tile_rect.width() - 24.0).max(120.0);
         let top_right_rect = egui::Rect::from_min_size(
             pos2(tile_rect.right() - controls_w - 10.0, tile_rect.top() + 10.0),
@@ -1173,7 +1189,6 @@ fn render_stream_tile(
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
 
-                // Botão Tela cheia
                 if large {
                     let fs_icon = if popout_is_fs {
                         IconKind::ExitFullscreen
@@ -1194,6 +1209,7 @@ fn render_stream_tile(
                         } else {
                             PillVariant::Overlay
                         },
+                        pal,
                         28.0,
                     )
                     .on_hover_text(if popout_is_fs {
@@ -1211,7 +1227,6 @@ fn render_stream_tile(
                     }
                 }
 
-                // Botão Janela separada / Voltar à sala
                 if in_popout {
                     if !popout_is_fs
                         && icon_pill_button(
@@ -1219,6 +1234,7 @@ fn render_stream_tile(
                             IconKind::DockBack,
                             Some("Voltar"),
                             PillVariant::Overlay,
+                            pal,
                             28.0,
                         )
                         .on_hover_text("Trazer transmissão de volta para a sala")
@@ -1226,20 +1242,27 @@ fn render_stream_tile(
                     {
                         action.dock_back = true;
                     }
-                } else if icon_pill_button(ui, IconKind::PopOut, None, PillVariant::Overlay, 28.0)
-                    .on_hover_text("Abrir em janela separada")
-                    .clicked()
+                } else if icon_pill_button(
+                    ui,
+                    IconKind::PopOut,
+                    None,
+                    PillVariant::Overlay,
+                    pal,
+                    28.0,
+                )
+                .on_hover_text("Abrir em janela separada")
+                .clicked()
                 {
                     app.popped_out.insert(stream.identity.clone());
                 }
 
-                // Botão Destacar em miniaturas
                 if !large
                     && icon_pill_button(
                         ui,
                         IconKind::Spotlight,
                         Some("Destacar"),
                         PillVariant::ActiveWhite,
+                        pal,
                         26.0,
                     )
                     .clicked()
@@ -1248,7 +1271,6 @@ fn render_stream_tile(
                     app.grid_mode = false;
                 }
 
-                // Controles de recepção & volume para transmissões remotas (dentro de uma pílula flutuante)
                 if large && !stream.is_local && tile_rect.width() >= 440.0 {
                     egui::Frame::NONE
                         .fill(BG_OVERLAY)
@@ -1329,7 +1351,7 @@ fn render_stream_tile(
     action
 }
 
-fn draw_peer_avatar(ui: &mut egui::Ui, name: &str, sharing: bool) {
+fn draw_peer_avatar(ui: &mut egui::Ui, name: &str, sharing: bool, pal: ThemePalette) {
     let (rect, _) = ui.allocate_exact_size(vec2(32.0, 32.0), egui::Sense::hover());
     let p = ui.painter();
     let initial = name
@@ -1340,7 +1362,7 @@ fn draw_peer_avatar(ui: &mut egui::Ui, name: &str, sharing: bool) {
     p.circle_filled(
         rect.center(),
         15.0,
-        if sharing { ACCENT_RED_DIM } else { BG_CONTROL },
+        if sharing { pal.accent_dim } else { BG_CONTROL },
     );
     p.circle_stroke(
         rect.center(),
@@ -1348,7 +1370,7 @@ fn draw_peer_avatar(ui: &mut egui::Ui, name: &str, sharing: bool) {
         Stroke::new(
             1.4_f32,
             if sharing {
-                ACCENT_RED_BRIGHT
+                pal.accent_bright
             } else {
                 BORDER_STRONG
             },

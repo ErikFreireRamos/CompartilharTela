@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use ct_core::settings::ThemeId;
 use egui::{
     Align2, Color32, ColorImage, Context, CornerRadius, FontData, FontDefinitions, FontFamily,
     FontId, IconData, Rect, Response, RichText, Sense, Shadow, Stroke, TextureHandle,
@@ -7,8 +8,7 @@ use egui::{
 };
 
 // =============================================================================
-// Paleta PIT — Inspirada na WSTR Combat Shotgun (Marathon / Bungie)
-// Base preto fosco carbono + branco cerâmico puro + cinza titânio + vermelho tático
+// Base cromática PIT — Preto carbono fosco + Branco puro + Cinza titânio
 // =============================================================================
 pub const BG_VOID: Color32 = Color32::from_rgb(8, 9, 11);
 pub const BG_SURFACE: Color32 = Color32::from_rgb(17, 19, 23);
@@ -26,14 +26,47 @@ pub const TEXT_PRIMARY: Color32 = Color32::from_rgb(244, 245, 248);
 pub const TEXT_SECONDARY: Color32 = Color32::from_rgb(166, 173, 188);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(112, 120, 136);
 
-pub const ACCENT_RED: Color32 = Color32::from_rgb(232, 35, 46);
-pub const ACCENT_RED_BRIGHT: Color32 = Color32::from_rgb(255, 59, 71);
-pub const ACCENT_RED_DIM: Color32 = Color32::from_rgb(54, 17, 22);
+// Cores de acento dos dois temas selecionáveis
+pub const RED_ACCENT: Color32 = Color32::from_rgb(232, 35, 46);
+pub const RED_BRIGHT: Color32 = Color32::from_rgb(255, 59, 71);
+pub const RED_DIM: Color32 = Color32::from_rgb(54, 17, 22);
+
+pub const MARATHON_GREEN: Color32 = Color32::from_rgb(194, 254, 12); // #C2FE0C
+pub const MARATHON_GREEN_BRIGHT: Color32 = Color32::from_rgb(214, 255, 77);
+pub const MARATHON_GREEN_DIM: Color32 = Color32::from_rgb(34, 46, 10);
 
 pub const ACCENT_LIVE: Color32 = Color32::from_rgb(34, 229, 138);
 pub const ACCENT_WARN: Color32 = Color32::from_rgb(245, 184, 65);
 
 pub const APP_NAME: &str = "PIT";
+
+#[derive(Clone, Copy, Debug)]
+pub struct ThemePalette {
+    pub accent: Color32,
+    pub accent_bright: Color32,
+    pub accent_dim: Color32,
+    /// Cor do texto sobre fundo `accent` (branco no vermelho, preto no verde Marathon).
+    pub accent_ink: Color32,
+}
+
+impl ThemePalette {
+    pub fn for_theme(theme: ThemeId) -> Self {
+        match theme {
+            ThemeId::Red => Self {
+                accent: RED_ACCENT,
+                accent_bright: RED_BRIGHT,
+                accent_dim: RED_DIM,
+                accent_ink: WHITE_PURE,
+            },
+            ThemeId::MarathonGreen => Self {
+                accent: MARATHON_GREEN,
+                accent_bright: MARATHON_GREEN_BRIGHT,
+                accent_dim: MARATHON_GREEN_DIM,
+                accent_ink: INK_ON_WHITE,
+            },
+        }
+    }
+}
 
 static LOGO_PNG_BYTES: &[u8] = include_bytes!("../../assets/logo.png");
 static FONT_GROTESK_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/SpaceGrotesk-Medium.ttf");
@@ -52,7 +85,9 @@ pub fn mono_text(text: impl Into<String>, size: f32) -> RichText {
     RichText::new(text.into()).font(FontId::new(size, FontFamily::Monospace))
 }
 
-pub fn configure_theme(ctx: &Context) {
+pub fn configure_theme(ctx: &Context, theme: ThemeId) {
+    let pal = ThemePalette::for_theme(theme);
+
     // 1. Fontes embutidas (Space Grotesk + JetBrains Mono)
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
@@ -81,11 +116,11 @@ pub fn configure_theme(ctx: &Context) {
     fonts.families.insert(display_family(), display_fallbacks);
     ctx.set_fonts(fonts);
 
-    // 2. Estilo visual WSTR / Marathon
+    // 2. Estilo visual PIT
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = vec2(10.0, 8.0);
     style.spacing.button_padding = vec2(14.0, 7.0);
-    style.spacing.window_margin = egui::Margin::same(18);
+    style.spacing.window_margin = egui::Margin::same(16);
     style.spacing.slider_width = 96.0;
 
     let mut visuals = egui::Visuals::dark();
@@ -94,8 +129,8 @@ pub fn configure_theme(ctx: &Context) {
     visuals.extreme_bg_color = Color32::from_rgb(12, 14, 18);
     visuals.faint_bg_color = BG_CARD;
     visuals.override_text_color = Some(TEXT_PRIMARY);
-    visuals.selection.bg_fill = ACCENT_RED;
-    visuals.selection.stroke = Stroke::new(1.0_f32, WHITE_PURE);
+    visuals.selection.bg_fill = pal.accent;
+    visuals.selection.stroke = Stroke::new(1.0_f32, pal.accent_ink);
 
     visuals.widgets.noninteractive.bg_fill = BG_SURFACE;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER_SUBTLE);
@@ -136,6 +171,14 @@ pub fn configure_theme(ctx: &Context) {
     ctx.set_style(style);
 }
 
+pub fn apply_theme_accent(ctx: &Context, theme: ThemeId) {
+    let pal = ThemePalette::for_theme(theme);
+    ctx.style_mut(|style| {
+        style.visuals.selection.bg_fill = pal.accent;
+        style.visuals.selection.stroke = Stroke::new(1.0_f32, pal.accent_ink);
+    });
+}
+
 pub fn load_window_icon() -> Option<IconData> {
     let img = image::load_from_memory(LOGO_PNG_BYTES).ok()?;
     let resized = img.resize_exact(128, 128, image::imageops::FilterType::Lanczos3);
@@ -171,44 +214,68 @@ pub fn primary_white_button(text: impl Into<String>) -> egui::Button<'static> {
         .corner_radius(CornerRadius::same(10))
 }
 
-pub fn tactical_red_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(display_text(text, 14.0).color(WHITE_PURE))
-        .fill(ACCENT_RED)
-        .stroke(Stroke::new(1.0_f32, ACCENT_RED_BRIGHT))
+pub fn tactical_accent_button(text: impl Into<String>, pal: ThemePalette) -> egui::Button<'static> {
+    egui::Button::new(display_text(text, 14.0).color(pal.accent_ink))
+        .fill(pal.accent)
+        .stroke(Stroke::new(1.0_f32, pal.accent_bright))
         .corner_radius(CornerRadius::same(10))
 }
 
+/// Desenha o logo personalizado PIT em tamanho quadrado exato (sem esticar em containers centralizados).
 pub fn draw_logo_badge(ui: &mut Ui, logo: Option<&TextureHandle>, size: f32, framed: bool) {
+    let pad = if framed { (size * 0.14).round().max(4.0) } else { 0.0 };
+    let outer = size + pad * 2.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(outer, outer), Sense::hover());
+    let p = ui.painter();
+
     if framed {
-        egui::Frame::NONE
-            .fill(BG_CARD)
-            .stroke(Stroke::new(1.0_f32, BORDER_STRONG))
-            .corner_radius(CornerRadius::same((size * 0.28).round() as u8))
-            .inner_margin(egui::Margin::same((size * 0.1).round() as i8))
-            .show(ui, |ui| {
-                if let Some(tex) = logo {
-                    ui.add(egui::Image::new((tex.id(), vec2(size, size))));
-                } else {
-                    draw_fallback_mark(ui, size);
-                }
-            });
-    } else if let Some(tex) = logo {
-        ui.add(egui::Image::new((tex.id(), vec2(size, size))));
+        let radius = CornerRadius::same((outer * 0.26).round() as u8);
+        p.rect(
+            rect,
+            radius,
+            BG_CARD,
+            Stroke::new(1.0_f32, BORDER_STRONG),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    let img_rect = rect.shrink(pad);
+    if let Some(tex) = logo {
+        p.image(
+            tex.id(),
+            img_rect,
+            Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
     } else {
-        draw_fallback_mark(ui, size);
+        p.rect_filled(img_rect, CornerRadius::same(6), RED_ACCENT);
+        p.text(
+            img_rect.center(),
+            Align2::CENTER_CENTER,
+            "P",
+            FontId::new(size * 0.62, display_family()),
+            WHITE_PURE,
+        );
     }
 }
 
-fn draw_fallback_mark(ui: &mut Ui, size: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
-    let p = ui.painter();
-    p.rect_filled(rect, CornerRadius::same(6), ACCENT_RED);
-    p.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        "P",
-        FontId::new(size * 0.62, display_family()),
-        WHITE_PURE,
+/// Pinta o ícone grande em baixa opacidade centralizado no fundo da tela de sala vazia.
+pub fn paint_logo_watermark(
+    painter: &egui::Painter,
+    stage_rect: Rect,
+    logo: Option<&TextureHandle>,
+    alpha: u8,
+) {
+    let Some(tex) = logo else {
+        return;
+    };
+    let side = (stage_rect.width().min(stage_rect.height()) * 0.68).clamp(220.0, 460.0);
+    let img_rect = Rect::from_center_size(stage_rect.center(), vec2(side, side));
+    painter.image(
+        tex.id(),
+        img_rect,
+        Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+        Color32::from_rgba_unmultiplied(255, 255, 255, alpha),
     );
 }
 
@@ -219,9 +286,8 @@ pub fn draw_status_dot(ui: &mut Ui, color: Color32, radius: f32) {
     p.circle_filled(rect.center(), radius, color);
 }
 
-pub fn paint_marathon_backdrop(painter: &egui::Painter, rect: Rect) {
+pub fn paint_marathon_backdrop(painter: &egui::Painter, rect: Rect, pal: ThemePalette) {
     let grid_stroke = Stroke::new(1.0_f32, Color32::from_rgb(20, 23, 29));
-    // Grade arquitetônica sutil estilo Marathon
     let step = 72.0;
     let mut x = rect.left() + step;
     while x < rect.right() {
@@ -234,9 +300,9 @@ pub fn paint_marathon_backdrop(painter: &egui::Painter, rect: Rect) {
         y += step;
     }
 
-    // Faixa tática vermelha fina no topo esquerdo + detalhe branco no rodapé direito
-    let red_bar = Rect::from_min_size(pos2(rect.left() + 28.0, rect.top() + 24.0), vec2(56.0, 3.0));
-    painter.rect_filled(red_bar, 1.5, ACCENT_RED);
+    // Faixa tática na cor de acento no topo esquerdo + detalhe neutro no rodapé direito
+    let accent_bar = Rect::from_min_size(pos2(rect.left() + 28.0, rect.top() + 24.0), vec2(56.0, 3.0));
+    painter.rect_filled(accent_bar, 1.5, pal.accent);
 
     let white_bar = Rect::from_min_size(
         pos2(rect.right() - 84.0, rect.bottom() - 28.0),
@@ -261,7 +327,7 @@ pub fn paint_marathon_backdrop(painter: &egui::Painter, rect: Rect) {
 }
 
 // =============================================================================
-// Ícones vetoriais limpos (renderizados via egui::Painter — sem depender de emoji)
+// Ícones vetoriais limpos (renderizados via egui::Painter)
 // =============================================================================
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum IconKind {
@@ -287,8 +353,8 @@ pub enum IconKind {
 pub enum PillVariant {
     Dark,
     ActiveWhite,
-    TacticalRed,
-    GhostDanger,
+    TacticalAccent,
+    GhostAccent,
     Overlay,
 }
 
@@ -297,6 +363,7 @@ pub fn icon_pill_button(
     icon: IconKind,
     label: Option<&str>,
     variant: PillVariant,
+    pal: ThemePalette,
     height: f32,
 ) -> Response {
     let icon_size = 15.0;
@@ -304,7 +371,7 @@ pub fn icon_pill_button(
     let gap = if label.is_some() { 7.0 } else { 0.0 };
 
     let font_id = match variant {
-        PillVariant::ActiveWhite | PillVariant::TacticalRed => {
+        PillVariant::ActiveWhite | PillVariant::TacticalAccent => {
             FontId::new(13.0, display_family())
         }
         _ => FontId::new(13.0, FontFamily::Proportional),
@@ -342,29 +409,25 @@ pub fn icon_pill_button(
             INK_ON_WHITE,
             WHITE_PURE,
         ),
-        PillVariant::TacticalRed => (
+        PillVariant::TacticalAccent => (
             if pressed {
-                Color32::from_rgb(198, 26, 36)
+                pal.accent.linear_multiply(0.85)
             } else if hovered {
-                ACCENT_RED_BRIGHT
+                pal.accent_bright
             } else {
-                ACCENT_RED
+                pal.accent
             },
-            WHITE_PURE,
-            ACCENT_RED_BRIGHT,
+            pal.accent_ink,
+            pal.accent_bright,
         ),
-        PillVariant::GhostDanger => (
+        PillVariant::GhostAccent => (
+            if hovered { pal.accent } else { pal.accent_dim },
             if hovered {
-                ACCENT_RED
+                pal.accent_ink
             } else {
-                ACCENT_RED_DIM
+                pal.accent_bright
             },
-            if hovered {
-                WHITE_PURE
-            } else {
-                ACCENT_RED_BRIGHT
-            },
-            ACCENT_RED,
+            pal.accent,
         ),
         PillVariant::Overlay => (
             if hovered {
@@ -422,7 +485,10 @@ pub fn paint_icon(p: &egui::Painter, r: Rect, icon: IconKind, color: Color32) {
                 s,
             );
             p.line_segment(
-                [pos2(c.x - w * 0.25, r.bottom() - 1.0), pos2(c.x + w * 0.25, r.bottom() - 1.0)],
+                [
+                    pos2(c.x - w * 0.25, r.bottom() - 1.0),
+                    pos2(c.x + w * 0.25, r.bottom() - 1.0),
+                ],
                 s,
             );
         }

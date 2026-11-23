@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use ct_core::protocol::{AudioQualityId, ResolutionId};
+use ct_core::settings::ThemeId;
 use ct_media::audio::AudioApp;
 use ct_media::screen::{GpuAdapterInfo, ScreenSource};
 use ct_media::session::{Phase, RoomSession, SessionSnapshot};
@@ -23,9 +24,10 @@ pub struct CompartilharApp {
     pub snap_rx: watch::Receiver<SessionSnapshot>,
     pub snap: SessionSnapshot,
 
-    // Identidade visual (ícone da janela/pop-out e textura do logo na UI)
+    // Identidade visual (ícone da janela/pop-out, textura do logo e tema ativo)
     pub app_icon: Option<IconData>,
     pub logo_texture: Option<TextureHandle>,
+    pub active_theme: ThemeId,
 
     // Home UI state
     pub nickname_input: String,
@@ -73,6 +75,7 @@ impl CompartilharApp {
         let selected_resolution = ResolutionId::from_quality(snap.settings.quality);
         let selected_fps = snap.settings.fps;
         let selected_audio_quality = snap.settings.audio_quality;
+        let active_theme = snap.settings.theme;
         let gpu_adapters = session.list_gpu_adapters();
         let selected_gpu_idx = gpu_adapters
             .iter()
@@ -87,6 +90,7 @@ impl CompartilharApp {
             snap,
             app_icon,
             logo_texture,
+            active_theme,
             nickname_input,
             code_input: String::new(),
             focused_id: None,
@@ -109,6 +113,22 @@ impl CompartilharApp {
             audio_apps: Arc::new(StdMutex::new(Vec::new())),
             textures: HashMap::new(),
         }
+    }
+
+    pub fn palette(&self) -> theme::ThemePalette {
+        theme::ThemePalette::for_theme(self.active_theme)
+    }
+
+    pub fn set_theme(&mut self, ctx: &Context, new_theme: ThemeId) {
+        if self.active_theme == new_theme {
+            return;
+        }
+        self.active_theme = new_theme;
+        theme::apply_theme_accent(ctx, new_theme);
+        let session = self.session.clone();
+        self.rt.spawn(async move {
+            session.update_settings(|s| s.theme = new_theme).await;
+        });
     }
 
     pub fn refresh_audio_apps_async(&self, ctx: &Context) {
