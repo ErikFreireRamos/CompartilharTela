@@ -3,264 +3,183 @@ use ct_core::protocol::{
     RECOMMENDED_RESOLUTION, RESOLUTIONS,
 };
 use ct_media::session::ShareOptions;
-use egui::{Color32, Context, RichText, Stroke, Window};
+use egui::{Align2, Context, CornerRadius, RichText, Stroke, Window, vec2};
 
-use super::{
-    ACCENT_GREEN, ACCENT_PRIMARY, BG_CARD, BG_CONTROL, CompartilharApp, TEXT_MUTED, primary_button,
+use super::CompartilharApp;
+use super::theme::{
+    ACCENT_LIVE, BG_CARD, BG_CONTROL, BG_SURFACE, BORDER_STRONG, BORDER_SUBTLE, INK_ON_WHITE,
+    TEXT_MUTED, TEXT_PRIMARY, TEXT_SECONDARY, ThemePalette, WHITE_PURE, display_text, mono_text,
+    primary_white_button,
 };
 
 pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
+    let pal = app.palette();
     let mut open = app.show_share_dialog;
-    let mut res = app.selected_resolution;
-    let mut fps = app.selected_fps;
-    let mut audio_q = app.selected_audio_quality;
-    let mut content_type = app.snap.settings.content_type;
-    let mut share_audio = app.snap.settings.share_audio;
-    let mut blocked = app.snap.settings.blocked_apps.clone();
+    let mut draft = ShareDraft {
+        res: app.selected_resolution,
+        fps: app.selected_fps,
+        audio_q: app.selected_audio_quality,
+        content_type: app.snap.settings.content_type,
+        share_audio: app.snap.settings.share_audio,
+        blocked: app.snap.settings.blocked_apps.clone(),
+        settings_dirty: false,
+    };
     let apps_snapshot = app.audio_apps.lock().map(|g| g.clone()).unwrap_or_default();
 
     let mut start_clicked = false;
     let mut cancel_clicked = false;
-    let mut settings_dirty = false;
+
+    // Adapta largura e layout ao tamanho atual da janela para evitar scroll sempre que possível
+    let screen = ctx.screen_rect();
+    let two_cols = screen.width() >= 760.0;
+    let dialog_w = if two_cols {
+        (screen.width() - 64.0).clamp(680.0, 820.0)
+    } else {
+        (screen.width() - 40.0).clamp(440.0, 560.0)
+    };
+    let needs_outer_scroll = !two_cols || screen.height() < 490.0;
+
+    // Calcula a altura interna exata da coluna da esquerda para que a coluna de Áudio (direita)
+    // tenha exatamente o mesmo tamanho e a lista de aplicativos ocupe todo o espaço disponível!
+    let has_gpu_picker = app.gpu_adapters.len() > 2;
+    let target_col_inner_h = if has_gpu_picker { 268.0_f32 } else { 236.0_f32 };
+    let apps_list_h = if two_cols {
+        // Espaço restante dentro do card da direita para a lista de aplicativos
+        (target_col_inner_h - 122.0).max(114.0)
+    } else {
+        130.0
+    };
 
     Window::new("Configurar transmissão")
         .open(&mut open)
+        .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+        .constrain(true)
         .collapsible(false)
         .resizable(false)
-        .min_width(500.0)
+        .fixed_size(vec2(dialog_w, 0.0))
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(BG_SURFACE)
+                .stroke(Stroke::new(1.0_f32, BORDER_STRONG))
+                .corner_radius(CornerRadius::same(16))
+                .inner_margin(egui::Margin::same(16)),
+        )
         .show(ctx, |ui| {
-            // Recomendação estável de qualidade com botão rápido
+            // Linha 1: Cabeçalho limpo (sem repetir o ícone do aplicativo)
+            ui.vertical(|ui| {
+                ui.label(display_text("Preparar compartilhamento", 16.0).color(WHITE_PURE));
+                ui.label(
+                    RichText::new("Você pode ajustar qualidade e apps ao vivo depois.")
+                        .size(11.5)
+                        .color(TEXT_MUTED),
+                );
+            });
+
+            ui.add_space(8.0);
+
+            // Linha 2 dedicada: Banner Recomendado em largura total
             egui::Frame::NONE
                 .fill(BG_CARD)
-                .stroke(Stroke::new(1.0_f32, ACCENT_GREEN))
-                .corner_radius(8.0)
-                .inner_margin(10.0)
+                .stroke(Stroke::new(1.0_f32, ACCENT_LIVE.linear_multiply(0.65)))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(egui::Margin::symmetric(12, 7))
                 .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("Recomendado para maior estabilidade:")
-                                    .strong()
-                                    .color(ACCENT_GREEN),
-                            );
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} · {} fps · {}",
-                                    RECOMMENDED_RESOLUTION.label(),
-                                    RECOMMENDED_FPS,
-                                    RECOMMENDED_AUDIO_QUALITY.label()
-                                ))
-                                .size(12.5)
-                                .color(TEXT_MUTED),
-                            );
-                        });
+                        ui.label(mono_text("RECOMENDADO", 10.5).color(ACCENT_LIVE));
+                        ui.label(
+                            RichText::new(format!(
+                                "•  {} · {} fps · {}",
+                                RECOMMENDED_RESOLUTION.label(),
+                                RECOMMENDED_FPS,
+                                RECOMMENDED_AUDIO_QUALITY.label()
+                            ))
+                            .size(12.5)
+                            .color(TEXT_PRIMARY),
+                        );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Usar recomendado").clicked() {
-                                res = RECOMMENDED_RESOLUTION;
-                                fps = RECOMMENDED_FPS;
-                                audio_q = RECOMMENDED_AUDIO_QUALITY;
-                                app.selected_resolution = res;
-                                app.selected_fps = fps;
-                                app.selected_audio_quality = audio_q;
-                                settings_dirty = true;
+                            if ui
+                                .add(
+                                    primary_white_button("Usar recomendado")
+                                        .min_size(vec2(134.0, 26.0)),
+                                )
+                                .clicked()
+                            {
+                                draft.res = RECOMMENDED_RESOLUTION;
+                                draft.fps = RECOMMENDED_FPS;
+                                draft.audio_q = RECOMMENDED_AUDIO_QUALITY;
+                                app.selected_resolution = draft.res;
+                                app.selected_fps = draft.fps;
+                                app.selected_audio_quality = draft.audio_q;
+                                draft.settings_dirty = true;
                             }
                         });
                     });
                 });
 
             ui.add_space(10.0);
-            ui.label(RichText::new("Monitor").strong());
-            egui::ComboBox::from_id_salt("screen_picker")
-                .width(ui.available_width())
-                .selected_text(
-                    app.screen_sources
-                        .get(app.selected_source_idx)
-                        .map(|s| s.name.as_str())
-                        .unwrap_or("Nenhuma tela detectada"),
-                )
-                .show_ui(ui, |ui| {
-                    for (idx, src) in app.screen_sources.iter().enumerate() {
-                        ui.selectable_value(&mut app.selected_source_idx, idx, &src.name);
-                    }
-                });
 
-            // Seleção de GPU quando houver mais de 1 GPU disponível no PC
-            if app.gpu_adapters.len() > 2 {
-                ui.add_space(10.0);
-                ui.label(RichText::new("GPU de captura").strong());
-                egui::ComboBox::from_id_salt("gpu_picker")
-                    .width(ui.available_width())
-                    .selected_text(
-                        app.gpu_adapters
-                            .get(app.selected_gpu_idx)
-                            .map(|g| g.name.as_str())
-                            .unwrap_or("Automática"),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (idx, gpu) in app.gpu_adapters.iter().enumerate() {
-                            if ui
-                                .selectable_value(&mut app.selected_gpu_idx, idx, &gpu.name)
-                                .changed()
-                            {
-                                settings_dirty = true;
-                            }
-                        }
+            if needs_outer_scroll {
+                let body_max_h = (screen.height() - 180.0).clamp(200.0, 420.0);
+                egui::ScrollArea::vertical()
+                    .max_height(body_max_h)
+                    .show(ui, |ui| {
+                        render_video_col(app, ui, pal, &mut draft);
+                        ui.add_space(10.0);
+                        render_audio_col(app, ctx, ui, pal, &apps_snapshot, apps_list_h, &mut draft);
                     });
-            }
+            } else {
+                // Layout horizontal de 2 colunas com a MESMA altura exata!
+                ui.columns(2, |cols| {
+                    let left_resp = egui::Frame::NONE
+                        .fill(BG_CARD)
+                        .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+                        .corner_radius(CornerRadius::same(12))
+                        .inner_margin(12.0)
+                        .show(&mut cols[0], |ui| {
+                            ui.set_min_height(target_col_inner_h);
+                            render_video_col(app, ui, pal, &mut draft);
+                        });
 
-            ui.add_space(10.0);
-            ui.label(RichText::new("Resolução").strong());
-            ui.horizontal(|ui| {
-                for &opt in RESOLUTIONS {
-                    let selected = res == opt;
-                    let label = if opt == RECOMMENDED_RESOLUTION {
-                        format!("{} ★", opt.label())
-                    } else {
-                        opt.label().to_string()
-                    };
-                    let btn = egui::Button::new(
-                        RichText::new(label)
-                            .color(if selected { Color32::WHITE } else { TEXT_MUTED })
-                            .strong(),
-                    )
-                    .fill(if selected { ACCENT_PRIMARY } else { BG_CONTROL });
-                    if ui.add(btn).clicked() {
-                        res = opt;
-                        app.selected_resolution = opt;
-                        settings_dirty = true;
-                    }
-                }
-            });
+                    let left_inner_h =
+                        (left_resp.response.rect.height() - 24.0).max(target_col_inner_h);
+                    let dynamic_apps_h = (left_inner_h - 122.0).max(apps_list_h);
 
-            ui.add_space(10.0);
-            ui.label(RichText::new("Taxa de quadros (FPS)").strong());
-            ui.horizontal(|ui| {
-                for &opt in FPS_OPTIONS {
-                    let selected = fps == opt;
-                    let label = if opt == RECOMMENDED_FPS {
-                        format!("{opt} fps ★")
-                    } else {
-                        format!("{opt} fps")
-                    };
-                    let btn = egui::Button::new(
-                        RichText::new(label)
-                            .color(if selected { Color32::WHITE } else { TEXT_MUTED })
-                            .strong(),
-                    )
-                    .fill(if selected { ACCENT_PRIMARY } else { BG_CONTROL });
-                    if ui.add(btn).clicked() {
-                        fps = opt;
-                        app.selected_fps = opt;
-                        settings_dirty = true;
-                    }
-                }
-            });
-
-            ui.add_space(10.0);
-            ui.label(RichText::new("Otimização de imagem").strong());
-            ui.horizontal(|ui| {
-                if ui
-                    .radio_value(
-                        &mut content_type,
-                        ContentType::Motion,
-                        "Jogo / vídeo (mais fluidez)",
-                    )
-                    .changed()
-                {
-                    settings_dirty = true;
-                }
-                if ui
-                    .radio_value(
-                        &mut content_type,
-                        ContentType::Detail,
-                        "Texto / código (mais nitidez)",
-                    )
-                    .changed()
-                {
-                    settings_dirty = true;
-                }
-            });
-
-            ui.add_space(10.0);
-            if ui
-                .checkbox(
-                    &mut share_audio,
-                    "Transmitir áudio do PC (com bloqueio por aplicativo)",
-                )
-                .changed()
-            {
-                settings_dirty = true;
-            }
-
-            if share_audio {
-                ui.add_space(6.0);
-                ui.label(RichText::new("Qualidade do áudio").strong());
-                ui.horizontal(|ui| {
-                    for &opt in AUDIO_QUALITIES {
-                        let selected = audio_q == opt;
-                        let btn = egui::Button::new(
-                            RichText::new(opt.label())
-                                .color(if selected { Color32::WHITE } else { TEXT_MUTED })
-                                .size(12.5),
-                        )
-                        .fill(if selected { ACCENT_PRIMARY } else { BG_CONTROL });
-                        if ui.add(btn).clicked() {
-                            audio_q = opt;
-                            app.selected_audio_quality = opt;
-                            settings_dirty = true;
-                        }
-                    }
+                    egui::Frame::NONE
+                        .fill(BG_CARD)
+                        .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+                        .corner_radius(CornerRadius::same(12))
+                        .inner_margin(12.0)
+                        .show(&mut cols[1], |ui| {
+                            ui.set_min_height(left_inner_h);
+                            render_audio_col(
+                                app,
+                                ctx,
+                                ui,
+                                pal,
+                                &apps_snapshot,
+                                dynamic_apps_h,
+                                &mut draft,
+                            );
+                        });
                 });
-
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Apps bloqueados:").strong());
-                    if ui.small_button("Atualizar lista").clicked() {
-                        app.refresh_audio_apps_async(ctx);
-                    }
-                });
-                if apps_snapshot.is_empty() {
-                    ui.label(
-                        RichText::new(
-                            "Discord/Vesktop já ficam bloqueados por padrão. Apps tocando som aparecerão aqui.",
-                        )
-                        .size(12.0)
-                        .color(TEXT_MUTED),
-                    );
-                } else {
-                    egui::ScrollArea::vertical().max_height(130.0).show(ui, |ui| {
-                        for app_entry in &apps_snapshot {
-                            let mut is_blocked = blocked.iter().any(|b| b == &app_entry.exe);
-                            if ui
-                                .checkbox(
-                                    &mut is_blocked,
-                                    format!("{} ({})", app_entry.name, app_entry.exe),
-                                )
-                                .changed()
-                            {
-                                if is_blocked {
-                                    if !blocked.iter().any(|b| b == &app_entry.exe) {
-                                        blocked.push(app_entry.exe.clone());
-                                    }
-                                } else {
-                                    blocked.retain(|b| b != &app_entry.exe);
-                                }
-                                settings_dirty = true;
-                            }
-                        }
-                    });
-                }
             }
 
-            ui.add_space(14.0);
+            // Rodapé sempre fixo e visível
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add(primary_button("Iniciar transmissão").min_size(egui::vec2(160.0, 34.0)))
+                    .add(primary_white_button("Iniciar transmissão").min_size(vec2(170.0, 34.0)))
                     .clicked()
                 {
                     start_clicked = true;
                 }
-                if ui.button("Cancelar").clicked() {
+                if ui
+                    .add(egui::Button::new("Cancelar").min_size(vec2(90.0, 34.0)))
+                    .clicked()
+                {
                     cancel_clicked = true;
                 }
             });
@@ -274,6 +193,16 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
         .gpu_adapters
         .get(app.selected_gpu_idx)
         .and_then(|g| g.index);
+
+    let ShareDraft {
+        res,
+        fps,
+        audio_q,
+        content_type,
+        share_audio,
+        blocked,
+        settings_dirty,
+    } = draft;
 
     if settings_dirty {
         let session = app.session.clone();
@@ -319,4 +248,252 @@ pub fn render_share_dialog(app: &mut CompartilharApp, ctx: &Context) {
     }
 
     app.show_share_dialog = open;
+}
+
+struct ShareDraft {
+    res: ct_core::protocol::ResolutionId,
+    fps: u32,
+    audio_q: ct_core::protocol::AudioQualityId,
+    content_type: ContentType,
+    share_audio: bool,
+    blocked: Vec<String>,
+    settings_dirty: bool,
+}
+
+fn render_video_col(
+    app: &mut CompartilharApp,
+    ui: &mut egui::Ui,
+    pal: ThemePalette,
+    d: &mut ShareDraft,
+) {
+    section_heading(ui, "01", "Tela e placa de vídeo", pal);
+    ui.add_space(5.0);
+
+    egui::ComboBox::from_id_salt("screen_picker")
+        .width(ui.available_width())
+        .selected_text(
+            app.screen_sources
+                .get(app.selected_source_idx)
+                .map(|s| s.name.as_str())
+                .unwrap_or("Nenhuma tela detectada"),
+        )
+        .show_ui(ui, |ui| {
+            for (idx, src) in app.screen_sources.iter().enumerate() {
+                ui.selectable_value(&mut app.selected_source_idx, idx, &src.name);
+            }
+        });
+
+    if app.gpu_adapters.len() > 2 {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("GPU:").size(12.0).color(TEXT_SECONDARY));
+            egui::ComboBox::from_id_salt("gpu_picker")
+                .width((ui.available_width() - 4.0).max(150.0))
+                .selected_text(
+                    app.gpu_adapters
+                        .get(app.selected_gpu_idx)
+                        .map(|g| g.name.as_str())
+                        .unwrap_or("Automática"),
+                )
+                .show_ui(ui, |ui| {
+                    for (idx, gpu) in app.gpu_adapters.iter().enumerate() {
+                        if ui
+                            .selectable_value(&mut app.selected_gpu_idx, idx, &gpu.name)
+                            .changed()
+                        {
+                            d.settings_dirty = true;
+                        }
+                    }
+                });
+        });
+    }
+
+    ui.add_space(12.0);
+    section_heading(ui, "02", "Qualidade da imagem", pal);
+    ui.add_space(5.0);
+
+    ui.label(RichText::new("Resolução").size(11.5).color(TEXT_MUTED));
+    ui.horizontal_wrapped(|ui| {
+        for &opt in RESOLUTIONS {
+            let selected = d.res == opt;
+            let label = if opt == RECOMMENDED_RESOLUTION {
+                format!("{} ★", opt.label())
+            } else {
+                opt.label().to_string()
+            };
+            if select_pill(ui, &label, selected).clicked() {
+                d.res = opt;
+                app.selected_resolution = opt;
+                d.settings_dirty = true;
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.label(RichText::new("Taxa de quadros (FPS)").size(11.5).color(TEXT_MUTED));
+    ui.horizontal_wrapped(|ui| {
+        for &opt in FPS_OPTIONS {
+            let selected = d.fps == opt;
+            let label = if opt == RECOMMENDED_FPS {
+                format!("{opt} fps ★")
+            } else {
+                format!("{opt} fps")
+            };
+            if select_pill(ui, &label, selected).clicked() {
+                d.fps = opt;
+                app.selected_fps = opt;
+                d.settings_dirty = true;
+            }
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.label(RichText::new("Otimização").size(11.5).color(TEXT_MUTED));
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .radio_value(&mut d.content_type, ContentType::Motion, "Jogo / vídeo")
+            .changed()
+        {
+            d.settings_dirty = true;
+        }
+        if ui
+            .radio_value(&mut d.content_type, ContentType::Detail, "Texto / código")
+            .changed()
+        {
+            d.settings_dirty = true;
+        }
+    });
+}
+
+fn render_audio_col(
+    app: &mut CompartilharApp,
+    ctx: &Context,
+    ui: &mut egui::Ui,
+    pal: ThemePalette,
+    apps_snapshot: &[ct_media::audio::AudioApp],
+    apps_list_h: f32,
+    d: &mut ShareDraft,
+) {
+    section_heading(ui, "03", "Áudio do PC", pal);
+    ui.add_space(5.0);
+
+    if ui
+        .checkbox(&mut d.share_audio, "Transmitir som do PC")
+        .changed()
+    {
+        d.settings_dirty = true;
+    }
+
+    if d.share_audio {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Qualidade do áudio").size(11.5).color(TEXT_MUTED));
+        ui.horizontal_wrapped(|ui| {
+            for &opt in AUDIO_QUALITIES {
+                let selected = d.audio_q == opt;
+                if select_pill(ui, opt.short_label(), selected)
+                    .on_hover_text(opt.label())
+                    .clicked()
+                {
+                    d.audio_q = opt;
+                    app.selected_audio_quality = opt;
+                    d.settings_dirty = true;
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Silenciar apps:").size(12.0).color(TEXT_SECONDARY));
+            if ui.small_button("Atualizar").clicked() {
+                app.refresh_audio_apps_async(ctx);
+            }
+        });
+        if apps_snapshot.is_empty() {
+            egui::Frame::NONE
+                .fill(BG_SURFACE)
+                .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.set_min_height(apps_list_h);
+                    ui.set_width(ui.available_width());
+                    ui.label(
+                        RichText::new("Carregando lista de aplicativos abertos…")
+                            .size(11.5)
+                            .color(TEXT_MUTED),
+                    );
+                });
+        } else {
+            egui::Frame::NONE
+                .fill(BG_SURFACE)
+                .stroke(Stroke::new(1.0_f32, BORDER_SUBTLE))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.set_min_height(apps_list_h);
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::vertical()
+                        .id_salt("share_dialog_apps_scroll")
+                        .max_height(apps_list_h)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for app_entry in apps_snapshot {
+                                let mut is_blocked =
+                                    d.blocked.iter().any(|b| b == &app_entry.exe);
+                                let label = if app_entry.active {
+                                    format!("{} ({}) — tocando", app_entry.name, app_entry.exe)
+                                } else {
+                                    format!("{} ({})", app_entry.name, app_entry.exe)
+                                };
+                                if ui.checkbox(&mut is_blocked, label).changed() {
+                                    if is_blocked {
+                                        if !d.blocked.iter().any(|b| b == &app_entry.exe) {
+                                            d.blocked.push(app_entry.exe.clone());
+                                        }
+                                    } else {
+                                        d.blocked.retain(|b| b != &app_entry.exe);
+                                    }
+                                    d.settings_dirty = true;
+                                }
+                            }
+                        });
+                });
+        }
+    } else {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("Apenas vídeo será transmitido (sem som do PC).")
+                .size(12.0)
+                .color(TEXT_MUTED),
+        );
+    }
+}
+
+fn section_heading(ui: &mut egui::Ui, num: &str, title: &str, pal: ThemePalette) {
+    ui.horizontal(|ui| {
+        egui::Frame::NONE
+            .fill(pal.accent)
+            .corner_radius(CornerRadius::same(4))
+            .inner_margin(egui::Margin::symmetric(5, 1))
+            .show(ui, |ui| {
+                ui.label(mono_text(num, 10.0).color(pal.accent_ink));
+            });
+        ui.label(display_text(title, 13.5).color(WHITE_PURE));
+    });
+}
+
+fn select_pill(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let btn = egui::Button::new(if selected {
+        display_text(label, 12.0).color(INK_ON_WHITE)
+    } else {
+        RichText::new(label).size(12.0).color(TEXT_SECONDARY)
+    })
+    .fill(if selected { WHITE_PURE } else { BG_CONTROL })
+    .stroke(Stroke::new(
+        1.0_f32,
+        if selected { WHITE_PURE } else { BORDER_SUBTLE },
+    ))
+    .corner_radius(CornerRadius::same(8))
+    .min_size(vec2(0.0, 27.0));
+    ui.add(btn)
 }
